@@ -8,6 +8,11 @@ venice-provider
 - Use: Adds a Venice AI provider and model configuration to Pi.
 - ENV: VENICE_API_KEY (required) — API key used to authenticate against https://api.venice.ai/v1.
 
+ppq-provider
+- Use: Adds a ppq.ai provider and loads models from ~/.pi/agent/extensions/ppq-provider.json.
+- ENV: PPQ_API_KEY (required) — API key used to authenticate against https://api.ppq.ai/v1.
+- Config: ~/.pi/agent/extensions/ppq-provider.json (created on first run).
+
 voice-to-text
 - Use: Records microphone audio and transcribes it into the editor via Venice audio transcription.
 - ENV:

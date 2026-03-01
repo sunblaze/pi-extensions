@@ -15,6 +15,15 @@ export default function (pi: ExtensionAPI) {
         cost: { input: 2.19, output: 17.5, cacheRead: 0.22, cacheWrite: 0 },
         contextWindow: 256000,  // 256k tokens
         maxTokens: 128000  // Max output
+      },
+      {
+        id: 'openai-gpt-53-codex',
+        name: 'OpenAI GPT-5.3-Codex',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 2.19, output: 17.5, cacheRead: 0.22, cacheWrite: 0 },
+        contextWindow: 256000,
+        maxTokens: 128000
       }
     ],
     compat: {
