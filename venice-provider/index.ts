@@ -1,35 +1,106 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { homedir } from "os";
+import { dirname, join } from "path";
+
+const CONFIG_PATH = join(homedir(), ".pi", "agent", "extensions", "venice-provider.json");
+const DEFAULT_MODELS = [
+  {
+    id: "openai-gpt-53-codex",
+    name: "OpenAI GPT-5.3-Codex",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 2.19, output: 17.5, cacheRead: 0.22, cacheWrite: 0 },
+    contextWindow: 256000,
+    maxTokens: 128000,
+  },
+];
+
+type ModelConfig = {
+  id: string;
+  name?: string;
+  reasoning?: boolean;
+  input?: ("text" | "image")[];
+  cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  contextWindow?: number;
+  maxTokens?: number;
+  compat?: {
+    supportsDeveloperRole?: boolean;
+    supportsReasoningEffort?: boolean;
+    supportsUsageInStreaming?: boolean;
+    maxTokensField?: "max_completion_tokens" | "max_tokens";
+    requiresToolResultName?: boolean;
+    requiresAssistantAfterToolResult?: boolean;
+    requiresThinkingAsText?: boolean;
+    requiresMistralToolIds?: boolean;
+    thinkingFormat?: "openai" | "zai" | "qwen";
+  };
+  headers?: Record<string, string>;
+};
+
+type ExtensionConfig = {
+  models?: ModelConfig[];
+};
+
+function loadConfig(path = CONFIG_PATH): ExtensionConfig {
+  try {
+    if (!existsSync(path)) return {};
+    const raw = readFileSync(path, "utf-8");
+    const parsed = JSON.parse(raw) as ExtensionConfig;
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function ensureConfigFile(path = CONFIG_PATH) {
+  try {
+    if (existsSync(path)) return;
+    mkdirSync(dirname(path), { recursive: true });
+    const initial: ExtensionConfig = { models: DEFAULT_MODELS };
+    writeFileSync(path, JSON.stringify(initial, null, 2));
+  } catch {}
+}
+
+function normalizeModels(models: ModelConfig[]): ModelConfig[] {
+  return models.map((m) => ({
+    id: m.id,
+    name: m.name ?? m.id,
+    reasoning: m.reasoning ?? false,
+    input: m.input ?? ["text"],
+    cost: {
+      input: m.cost?.input ?? 0,
+      output: m.cost?.output ?? 0,
+      cacheRead: m.cost?.cacheRead ?? 0,
+      cacheWrite: m.cost?.cacheWrite ?? 0,
+    },
+    contextWindow: m.contextWindow ?? 128000,
+    maxTokens: m.maxTokens ?? 16384,
+    compat: m.compat,
+    headers: m.headers,
+  }));
+}
 
 export default function (pi: ExtensionAPI) {
-  pi.registerProvider('venice', {
-    baseUrl: 'https://api.venice.ai/v1',
-    apiKey: 'VENICE_API_KEY',  // Pulls from your env var
-    api: 'openai-completions',  // Venice uses OpenAI-compatible API
-    authHeader: true,  // Adds Authorization: Bearer <key>
-    models: [
-      {
-        id: 'openai-gpt-52-codex',
-        name: 'OpenAI GPT-5.2-Codex',
-        reasoning: true,  // Supports low/medium/high/xhigh effort
-        input: ['text', 'image'],  // Text + vision input
-        cost: { input: 2.19, output: 17.5, cacheRead: 0.22, cacheWrite: 0 },
-        contextWindow: 256000,  // 256k tokens
-        maxTokens: 128000  // Max output
-      },
-      {
-        id: 'openai-gpt-53-codex',
-        name: 'OpenAI GPT-5.3-Codex',
-        reasoning: true,
-        input: ['text', 'image'],
-        cost: { input: 2.19, output: 17.5, cacheRead: 0.22, cacheWrite: 0 },
-        contextWindow: 256000,
-        maxTokens: 128000
-      }
-    ],
+  ensureConfigFile();
+  const config = loadConfig();
+  const models = normalizeModels(
+    Array.isArray(config.models) && config.models.length > 0
+      ? config.models
+      : DEFAULT_MODELS
+  );
+
+  pi.registerProvider("venice", {
+    baseUrl: "https://api.venice.ai/v1",
+    apiKey: "VENICE_API_KEY",
+    api: "openai-completions",
+    authHeader: true,
+    models,
     compat: {
       supportsDeveloperRole: true,
-      maxTokensField: 'max_tokens',
-      reasoningEffort: ['low', 'medium', 'high', 'xhigh']  // Optional Pi extension for effort
-    }
+      maxTokensField: "max_tokens",
+      reasoningEffort: ["low", "medium", "high", "xhigh"],
+    },
   });
 }
