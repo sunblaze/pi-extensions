@@ -1033,15 +1033,23 @@ class FilePreviewOverlay {
     }
   }
 
+  private normalizeContentForRender(content: string): string {
+    // Tabs can be measured differently than rendered width by terminals.
+    // Expand them before truncation to keep rendered lines within bounds.
+    return content.replace(/\t/g, "    ");
+  }
+
   private row(content: string, innerWidth: number): string {
-    const clipped = truncateToWidth(content, innerWidth);
+    const normalized = this.normalizeContentForRender(content);
+    const clipped = truncateToWidth(normalized, innerWidth);
     const padding = Math.max(0, innerWidth - visibleWidth(clipped));
     return `│${clipped}${" ".repeat(padding)}│`;
   }
 
   private rowWithScrollbar(content: string, innerWidth: number, isThumb: boolean): string {
     const contentWidth = Math.max(1, innerWidth - 2);
-    const clipped = truncateToWidth(content, contentWidth);
+    const normalized = this.normalizeContentForRender(content);
+    const clipped = truncateToWidth(normalized, contentWidth);
     const padding = Math.max(0, contentWidth - visibleWidth(clipped));
     const scrollbarChar = isThumb
       ? this.theme.fg("accent", SCROLLBAR_THUMB_CHAR)
