@@ -32,11 +32,14 @@ const CODEX_MODEL_ID = "gpt-5.1-codex-mini";
 const HAIKU_MODEL_ID = "claude-haiku-4-5";
 const GIT_COMMAND_MAX_BUFFER_BYTES = 1_500_000;
 const GIT_DIFF_PREVIEW_MAX_BYTES = 240_000;
+const GIT_DIFF_FULL_CONTEXT_LINES = 1_000_000;
 const ANSI_RESET = "\u001b[0m";
 const ANSI_DIFF_ADDED = "\u001b[32m";
 const ANSI_DIFF_REMOVED = "\u001b[31m";
 const ANSI_DIFF_HUNK = "\u001b[36m";
 const ANSI_DIFF_META = "\u001b[2m";
+const ANSI_DIFF_ADDED_BG = "\u001b[48;2;0;32;0m";
+const ANSI_DIFF_REMOVED_BG = "\u001b[48;2;36;0;0m";
 
 const execFileAsync = promisify(execFile);
 
@@ -184,6 +187,7 @@ type PreviewLineKind = "plain" | "diff-meta" | "diff-hunk" | "diff-added" | "dif
 interface PreviewLine {
   text: string;
   kind: PreviewLineKind;
+  lineNumber?: number;
 }
 
 interface FilePreviewData {
@@ -233,11 +237,14 @@ const getGitRepoContextForPath = async (
 };
 
 const getGitDiffText = async (repoRoot: string, repoRelativePath: string): Promise<string | null> => {
+  const fullContextFlag = `--unified=${GIT_DIFF_FULL_CONTEXT_LINES}`;
+
   const diffAgainstHead = await runGitCommand(repoRoot, [
     "-c",
     "color.ui=never",
     "diff",
     "--no-ext-diff",
+    fullContextFlag,
     "HEAD",
     "--",
     repoRelativePath,
@@ -250,6 +257,7 @@ const getGitDiffText = async (repoRoot: string, repoRelativePath: string): Promi
     "color.ui=never",
     "diff",
     "--no-ext-diff",
+    fullContextFlag,
     "--cached",
     "--",
     repoRelativePath,
@@ -259,6 +267,7 @@ const getGitDiffText = async (repoRoot: string, repoRelativePath: string): Promi
     "color.ui=never",
     "diff",
     "--no-ext-diff",
+    fullContextFlag,
     "--",
     repoRelativePath,
   ]);
@@ -267,28 +276,51 @@ const getGitDiffText = async (repoRoot: string, repoRelativePath: string): Promi
   return `${stagedDiff ?? ""}${stagedDiff && unstagedDiff ? "\n" : ""}${unstagedDiff ?? ""}`;
 };
 
-const classifyDiffLine = (line: string): PreviewLineKind => {
-  if (line.startsWith("@@")) return "diff-hunk";
-  if (
-    line.startsWith("diff --git") ||
-    line.startsWith("index ") ||
-    line.startsWith("--- ") ||
-    line.startsWith("+++ ") ||
-    line.startsWith("new file mode ") ||
-    line.startsWith("deleted file mode ") ||
-    line.startsWith("similarity index ") ||
-    line.startsWith("rename from ") ||
-    line.startsWith("rename to ") ||
-    line.startsWith("old mode ") ||
-    line.startsWith("new mode ") ||
-    line.startsWith("Binary files ") ||
-    line.startsWith("\\ No newline at end of file")
-  ) {
-    return "diff-meta";
+const parseUnifiedDiffBody = (diffText: string): PreviewLine[] => {
+  const lines = normalizeLineEndings(diffText).split("\n");
+  const out: PreviewLine[] = [];
+
+  let inHunk = false;
+  let oldLine = 0;
+  let newLine = 0;
+
+  for (const line of lines) {
+    const hunkHeader = line.match(/^@@\s*-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s*@@/);
+    if (hunkHeader) {
+      oldLine = Number(hunkHeader[1]);
+      newLine = Number(hunkHeader[2]);
+      inHunk = true;
+      continue;
+    }
+
+    if (!inHunk) continue;
+    if (line.startsWith("\\ No newline at end of file")) continue;
+
+    if (line.startsWith("+")) {
+      out.push({ text: line.slice(1), kind: "diff-added", lineNumber: newLine });
+      newLine += 1;
+      continue;
+    }
+
+    if (line.startsWith("-")) {
+      out.push({ text: line.slice(1), kind: "diff-removed", lineNumber: oldLine });
+      oldLine += 1;
+      continue;
+    }
+
+    if (line.startsWith(" ")) {
+      out.push({ text: line.slice(1), kind: "diff-context", lineNumber: newLine });
+      oldLine += 1;
+      newLine += 1;
+      continue;
+    }
+
+    if (line.startsWith("diff --git ") || line.startsWith("index ")) {
+      inHunk = false;
+    }
   }
-  if (line.startsWith("+")) return "diff-added";
-  if (line.startsWith("-")) return "diff-removed";
-  return "diff-context";
+
+  return out;
 };
 
 const getDiffPreviewData = async (storedPath: string, cwd: string): Promise<FilePreviewData | null> => {
@@ -301,21 +333,31 @@ const getDiffPreviewData = async (storedPath: string, cwd: string): Promise<File
 
   const totalBytes = Buffer.byteLength(diffText, "utf8");
   let previewText = diffText;
-  let notice = "Showing git diff (vs HEAD when available)";
+  let notice = "Showing clean full-context diff (no git headers)";
 
   if (totalBytes > GIT_DIFF_PREVIEW_MAX_BYTES) {
     previewText = Buffer.from(diffText, "utf8").subarray(0, GIT_DIFF_PREVIEW_MAX_BYTES).toString("utf8");
     notice = `Diff preview truncated to ${GIT_DIFF_PREVIEW_MAX_BYTES.toLocaleString()} bytes (diff is ${totalBytes.toLocaleString()} bytes)`;
   }
 
-  const lines = normalizeLineEndings(previewText)
-    .split("\n")
-    .map((line) => ({ text: line, kind: classifyDiffLine(line) }));
+  const parsedLines = parseUnifiedDiffBody(previewText);
+  if (parsedLines.length === 0) return null;
+
+  const language = getLanguageFromPath(absolutePath);
+  if (language) {
+    const highlighted = highlightCode(parsedLines.map((line) => line.text).join("\n"), language);
+    if (highlighted.length === parsedLines.length) {
+      for (let i = 0; i < parsedLines.length; i++) {
+        parsedLines[i] = { ...parsedLines[i], text: highlighted[i] ?? parsedLines[i].text };
+      }
+    }
+  }
 
   return {
     label: storedPath,
-    lines,
+    lines: parsedLines,
     notice,
+    language,
     mode: "diff",
   };
 };
@@ -1046,27 +1088,40 @@ class FilePreviewOverlay {
     return `│${clipped}${" ".repeat(padding)}│`;
   }
 
-  private rowWithScrollbar(content: string, innerWidth: number, isThumb: boolean): string {
+  private rowWithScrollbar(content: string, innerWidth: number, isThumb: boolean, lineKind?: PreviewLineKind): string {
     const contentWidth = Math.max(1, innerWidth - 2);
     const normalized = this.normalizeContentForRender(content);
     const clipped = truncateToWidth(normalized, contentWidth);
     const padding = Math.max(0, contentWidth - visibleWidth(clipped));
+    let body = `${clipped}${" ".repeat(padding)}`;
+
+    if (lineKind === "diff-added") {
+      body = `${ANSI_DIFF_ADDED_BG}${ANSI_DIFF_ADDED}${body}${ANSI_RESET}`;
+    } else if (lineKind === "diff-removed") {
+      body = `${ANSI_DIFF_REMOVED_BG}${ANSI_DIFF_REMOVED}${body}${ANSI_RESET}`;
+    }
+
     const scrollbarChar = isThumb
       ? this.theme.fg("accent", SCROLLBAR_THUMB_CHAR)
       : this.theme.fg("dim", SCROLLBAR_TRACK_CHAR);
-    return `│${clipped}${" ".repeat(padding)} ${scrollbarChar}│`;
+    return `│${body} ${scrollbarChar}│`;
   }
 
-  private renderDiffLine(line: PreviewLine): string {
-    if (line.kind === "diff-added") return colorizeAnsi(line.text, ANSI_DIFF_ADDED);
-    if (line.kind === "diff-removed") return colorizeAnsi(line.text, ANSI_DIFF_REMOVED);
-    if (line.kind === "diff-hunk") return colorizeAnsi(line.text, ANSI_DIFF_HUNK);
-    if (line.kind === "diff-meta") return colorizeAnsi(line.text, ANSI_DIFF_META);
-    return line.text;
+  private renderDiffLine(line: PreviewLine, lineIndex: number): string {
+    const displayLine = line.lineNumber ?? lineIndex + 1;
+    const numbered = `${String(displayLine).padStart(4, " ")}  ${line.text}`;
+
+    if (line.kind === "diff-added" || line.kind === "diff-removed") {
+      return numbered;
+    }
+
+    if (line.kind === "diff-hunk") return colorizeAnsi(numbered, ANSI_DIFF_HUNK);
+    if (line.kind === "diff-meta") return colorizeAnsi(numbered, ANSI_DIFF_META);
+    return numbered;
   }
 
   private renderPreviewLine(line: PreviewLine, lineIndex: number): string {
-    if (this.activePreview.mode === "diff") return this.renderDiffLine(line);
+    if (this.activePreview.mode === "diff") return this.renderDiffLine(line, lineIndex);
     return `${String(lineIndex + 1).padStart(4, " ")}  ${line.text}`;
   }
 
@@ -1111,7 +1166,7 @@ class FilePreviewOverlay {
       const line = hasLine ? this.activePreview.lines[lineIndex] : undefined;
       const renderedLine = hasLine && line ? this.renderPreviewLine(line, lineIndex) : "";
       const isThumb = rowIndex >= thumbStart && rowIndex < thumbStart + thumbSize;
-      out.push(this.rowWithScrollbar(renderedLine, innerWidth, isThumb));
+      out.push(this.rowWithScrollbar(renderedLine, innerWidth, isThumb, line?.kind));
     }
 
     out.push(this.row("", innerWidth));
