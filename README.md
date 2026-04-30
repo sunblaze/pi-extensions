@@ -4,6 +4,11 @@ My extensions for my agent harness.
 
 Extensions
 
+context-comments
+- Use: Save line-level comments on session context and insert them into your next prompt.
+- Commands: /context-comments, /context-comments add, /context-comments list, /context-comments clear, /context-comments submit, /context-comments shortcuts.
+- Config: ~/.pi/agent/extensions/context-comments/config.json (optional shortcut overrides).
+
 venice-provider
 - Use: Adds a Venice AI provider and model configuration to Pi.
 - ENV: VENICE_API_KEY (required) — API key used to authenticate against https://api.venice.ai/v1.
