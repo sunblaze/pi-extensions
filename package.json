@@ -1,0 +1,26 @@
+{
+  "name": "pi-extensions",
+  "version": "0.1.0",
+  "private": true,
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./context-comments/index.ts",
+      "./exit-alias.ts",
+      "./footer-style.ts",
+      "./pi-stopwatch/index.ts",
+      "./ppq-provider/index.ts",
+      "./session-files/index.ts",
+      "./venice-provider/index.ts",
+      "./voice-to-text/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  }
+}
