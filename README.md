@@ -4,6 +4,11 @@ My extensions for my agent harness.
 
 Extensions
 
+clipboard-last-assistant
+- Use: Copies the last assistant text output on the current branch to the macOS clipboard.
+- Commands: /cp
+- ENV: none.
+
 context-comments
 - Use: Save line-level comments on session context and insert them into your next prompt.
 - Commands: /context-comments, /context-comments add, /context-comments list, /context-comments clear, /context-comments submit, /context-comments shortcuts.
