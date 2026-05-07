@@ -232,15 +232,23 @@ function fitToWidth(text: string, width: number): string {
 
 type PickerResult = "submit" | null;
 
+type DisplayRow =
+  | { kind: "line"; line: ContextLine; lineIndex: number }
+  | { kind: "filtered"; entryId: string; role: string; startLine: number; endLine: number; count: number };
+
 class CommentPicker implements Component, Focusable {
   private selected: number;
   private anchor: number | undefined;
-  private mode: "select" | "comment" = "select";
+  private mode: "select" | "comment" | "filter" = "select";
   private input = new Input();
   private _focused = false;
   private lastVisibleHeight = 14;
+  private roleCursor = 0;
 
   private readonly commentedLineIds: Set<string>;
+  private readonly availableRoles: string[];
+  private readonly roleLineCounts: Map<string, number>;
+  private readonly filteredRoles = new Set<string>();
 
   constructor(
     private readonly tui: TUI,
@@ -250,7 +258,13 @@ class CommentPicker implements Component, Focusable {
     private readonly done: (result: PickerResult) => void,
     private readonly onSave: (result: { selectedLines: ContextLine[]; comment: string }) => void,
   ) {
-    this.selected = Math.max(0, this.lines.length - 1);
+    this.availableRoles = Array.from(new Set(this.lines.map((line) => line.role)));
+    this.roleLineCounts = new Map<string, number>();
+    for (const line of this.lines) {
+      this.roleLineCounts.set(line.role, (this.roleLineCounts.get(line.role) ?? 0) + 1);
+    }
+
+    this.selected = this.findLastSelectableIndex() ?? -1;
     this.commentedLineIds = new Set(initiallyCommentedLineIds);
     this.configureInput();
   }
@@ -275,8 +289,17 @@ class CommentPicker implements Component, Focusable {
       return;
     }
 
+    if (this.mode === "filter") {
+      this.handleFilterInput(data);
+      return;
+    }
+
     if (matchesKey(data, Key.escape)) {
       this.done(null);
+      return;
+    }
+    if (data === "t") {
+      this.enterFilterMode();
       return;
     }
     if (data === "s" && this.commentedLineIds.size > 0) {
@@ -292,11 +315,11 @@ class CommentPicker implements Component, Focusable {
       return;
     }
     if (data === "<" || data === ",") {
-      this.moveTo(0);
+      this.moveToBoundary("start");
       return;
     }
     if (data === ">" || data === ".") {
-      this.moveTo(this.lines.length - 1);
+      this.moveToBoundary("end");
       return;
     }
     if (data === "b") {
@@ -315,12 +338,12 @@ class CommentPicker implements Component, Focusable {
       this.moveBy(Math.max(1, Math.floor(this.visibleHeight() / 2)));
       return;
     }
-    if (matchesKey(data, Key.space)) {
+    if (matchesKey(data, Key.space) && this.selected >= 0) {
       this.anchor = this.anchor === undefined ? this.selected : undefined;
       this.tui.requestRender();
       return;
     }
-    if (matchesKey(data, Key.enter)) {
+    if (matchesKey(data, Key.enter) && this.selected >= 0) {
       this.mode = "comment";
       this.input.focused = this.focused;
       this.tui.requestRender();
@@ -329,29 +352,53 @@ class CommentPicker implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    const displayRows = this.buildDisplayRows();
     const border = this.theme.fg("accent", "─".repeat(Math.max(0, width)));
     const header = this.theme.fg("accent", this.theme.bold("Add context comment"));
     const canSubmit = this.commentedLineIds.size > 0;
+
+    const hiddenSummary =
+      this.filteredRoles.size > 0
+        ? ` • hidden: ${Array.from(this.filteredRoles)
+            .slice(0, 3)
+            .join(", ")}${this.filteredRoles.size > 3 ? ` +${this.filteredRoles.size - 3}` : ""}`
+        : "";
     const help = this.theme.fg(
       "dim",
-      `↑↓/jk move • f/b page • d/u half-page • </> or ,/. start/end • space anchor • enter comment${canSubmit ? " • s submit all" : ""} • esc cancel`,
+      this.mode === "filter"
+        ? "↑↓/jk move • space toggle • a show all • enter/esc done"
+        : `↑↓/jk move • f/b page • d/u half-page • </> or ,/. start/end • space anchor • enter comment • t types${canSubmit ? " • s submit all" : ""}${hiddenSummary} • esc cancel`,
     );
+
     const totalHeight = this.totalHeight();
     const inputBudget = this.mode === "comment" ? Math.max(3, Math.min(8, Math.floor(totalHeight * 0.3))) : 0;
-    const fixedRows = this.mode === "comment" ? 5 + inputBudget : 3;
+    const filterBudget = this.mode === "filter" ? Math.max(3, Math.min(8, Math.floor(totalHeight * 0.3))) : 0;
+    const fixedRows = this.mode === "comment" ? 5 + inputBudget : this.mode === "filter" ? 5 + filterBudget : 3;
     const visibleHeight = Math.max(3, totalHeight - fixedRows);
     this.lastVisibleHeight = visibleHeight;
 
-    const start = Math.max(0, Math.min(this.selected - Math.floor(visibleHeight / 2), this.lines.length - visibleHeight));
-    const end = Math.min(this.lines.length, start + visibleHeight);
+    const selectedDisplayIndex = this.selectedDisplayIndex(displayRows);
+    const start = Math.max(0, Math.min(selectedDisplayIndex - Math.floor(visibleHeight / 2), displayRows.length - visibleHeight));
+    const end = Math.min(displayRows.length, start + visibleHeight);
     const selection = this.selectionBounds();
 
     const rendered: string[] = [border, fitToWidth(` ${header}  ${help}`, width)];
 
     for (let i = start; i < end; i++) {
-      const line = this.lines[i]!;
-      const isCursor = i === this.selected;
-      const isSelected = selection !== undefined && i >= selection.start && i <= selection.end;
+      const row = displayRows[i]!;
+
+      if (row.kind === "filtered") {
+        const role = this.theme.fg("muted", row.role.padEnd(10).slice(0, 10));
+        const range = row.startLine === row.endLine ? `${row.entryId}:${row.startLine}` : `${row.entryId}:${row.startLine}-${row.endLine}`;
+        const loc = this.theme.fg("dim", range.padEnd(14).slice(0, 14));
+        const text = this.theme.fg("dim", `[filtered ${row.count} line${row.count === 1 ? "" : "s"}]`);
+        rendered.push(fitToWidth(` ·  ${role} ${loc} ${text}`, width));
+        continue;
+      }
+
+      const line = row.line;
+      const isCursor = row.lineIndex === this.selected;
+      const isSelected = selection !== undefined && row.lineIndex >= selection.start && row.lineIndex <= selection.end;
       const wasCommented = this.commentedLineIds.has(line.id);
       const marker = isSelected ? "●" : wasCommented ? "○" : " ";
       const role = this.theme.fg("muted", line.role.padEnd(10).slice(0, 10));
@@ -371,6 +418,30 @@ class CommentPicker implements Component, Focusable {
       }
     }
 
+    if (this.mode === "filter") {
+      rendered.push(border);
+      rendered.push(this.theme.fg("accent", " Context type filters (space toggles hidden/visible):"));
+
+      if (this.availableRoles.length === 0) {
+        rendered.push(fitToWidth(` ${this.theme.fg("dim", "No context types in this session yet.")}`, width));
+      } else {
+        const roleStart = Math.max(0, Math.min(this.roleCursor - Math.floor(filterBudget / 2), this.availableRoles.length - filterBudget));
+        const roleEnd = Math.min(this.availableRoles.length, roleStart + filterBudget);
+
+        for (let i = roleStart; i < roleEnd; i++) {
+          const role = this.availableRoles[i]!;
+          const hidden = this.filteredRoles.has(role);
+          const count = this.roleLineCounts.get(role) ?? 0;
+          let rowText = fitToWidth(
+            ` ${i === this.roleCursor ? "›" : " "}${hidden ? "☒" : "☐"} ${role.padEnd(12).slice(0, 12)} ${count} line${count === 1 ? "" : "s"}`,
+            width,
+          );
+          if (i === this.roleCursor) rowText = this.theme.bg("selectedBg", rowText);
+          rendered.push(rowText);
+        }
+      }
+    }
+
     rendered.push(border);
     return rendered;
   }
@@ -380,6 +451,7 @@ class CommentPicker implements Component, Focusable {
       const comment = value.trim();
       if (!comment) return;
       const selectedLines = this.currentSelection();
+      if (selectedLines.length === 0) return;
       this.onSave({ selectedLines, comment });
       for (const line of selectedLines) {
         this.commentedLineIds.add(line.id);
@@ -398,6 +470,72 @@ class CommentPicker implements Component, Focusable {
     };
   }
 
+  private handleFilterInput(data: string): void {
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter) || data === "t") {
+      this.mode = "select";
+      this.tui.requestRender();
+      return;
+    }
+
+    if (this.availableRoles.length === 0) return;
+
+    if (matchesKey(data, Key.up) || data === "k") {
+      this.roleCursor = Math.max(0, this.roleCursor - 1);
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.down) || data === "j") {
+      this.roleCursor = Math.min(this.availableRoles.length - 1, this.roleCursor + 1);
+      this.tui.requestRender();
+      return;
+    }
+    if (data === "<" || data === ",") {
+      this.roleCursor = 0;
+      this.tui.requestRender();
+      return;
+    }
+    if (data === ">" || data === ".") {
+      this.roleCursor = this.availableRoles.length - 1;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.space)) {
+      this.toggleCurrentRoleFilter();
+      return;
+    }
+    if (data === "a") {
+      this.filteredRoles.clear();
+      this.ensureSelectionValid();
+      this.tui.requestRender();
+    }
+  }
+
+  private enterFilterMode(): void {
+    this.mode = "filter";
+    if (this.selected >= 0) {
+      const selectedRole = this.lines[this.selected]?.role;
+      if (selectedRole) {
+        const idx = this.availableRoles.indexOf(selectedRole);
+        if (idx >= 0) this.roleCursor = idx;
+      }
+    }
+    this.tui.requestRender();
+  }
+
+  private toggleCurrentRoleFilter(): void {
+    const role = this.availableRoles[this.roleCursor];
+    if (!role) return;
+
+    if (this.filteredRoles.has(role)) {
+      this.filteredRoles.delete(role);
+    } else {
+      this.filteredRoles.add(role);
+    }
+
+    this.ensureSelectionValid();
+    this.tui.requestRender();
+  }
+
   private visibleHeight(): number {
     return this.lastVisibleHeight;
   }
@@ -406,24 +544,130 @@ class CommentPicker implements Component, Focusable {
     return Math.max(12, (process.stdout.rows ?? 24) - 2);
   }
 
-  private moveTo(index: number): void {
-    this.selected = Math.max(0, Math.min(this.lines.length - 1, index));
+  private moveToBoundary(boundary: "start" | "end"): void {
+    const target = boundary === "start" ? this.findFirstSelectableIndex() : this.findLastSelectableIndex();
+    if (target === undefined) return;
+    this.selected = target;
     this.tui.requestRender();
   }
 
   private moveBy(delta: number): void {
-    this.moveTo(this.selected + delta);
+    if (delta === 0) return;
+
+    if (this.selected < 0) {
+      const fallback = delta > 0 ? this.findFirstSelectableIndex() : this.findLastSelectableIndex();
+      if (fallback === undefined) return;
+      this.selected = fallback;
+      this.tui.requestRender();
+      return;
+    }
+
+    const direction: 1 | -1 = delta > 0 ? 1 : -1;
+    let current = this.selected;
+
+    for (let i = 0; i < Math.abs(delta); i++) {
+      const next = this.findNextSelectableIndex(current, direction);
+      if (next === undefined) break;
+      current = next;
+    }
+
+    if (current !== this.selected) {
+      this.selected = current;
+      this.tui.requestRender();
+    }
+  }
+
+  private buildDisplayRows(): DisplayRow[] {
+    const rows: DisplayRow[] = [];
+
+    for (let i = 0; i < this.lines.length; ) {
+      const line = this.lines[i]!;
+
+      if (!this.filteredRoles.has(line.role)) {
+        rows.push({ kind: "line", line, lineIndex: i });
+        i += 1;
+        continue;
+      }
+
+      const entryId = line.entryId;
+      const role = line.role;
+      const startLine = line.lineNumber;
+      let endLine = line.lineNumber;
+      let count = 0;
+
+      while (i < this.lines.length) {
+        const current = this.lines[i]!;
+        if (current.entryId !== entryId || current.role !== role || !this.filteredRoles.has(current.role)) break;
+        endLine = current.lineNumber;
+        count += 1;
+        i += 1;
+      }
+
+      rows.push({ kind: "filtered", entryId, role, startLine, endLine, count });
+    }
+
+    return rows;
+  }
+
+  private selectedDisplayIndex(displayRows: DisplayRow[]): number {
+    if (displayRows.length === 0) return 0;
+    const idx = displayRows.findIndex((row) => row.kind === "line" && row.lineIndex === this.selected);
+    return idx >= 0 ? idx : 0;
+  }
+
+  private findFirstSelectableIndex(): number | undefined {
+    for (let i = 0; i < this.lines.length; i++) {
+      if (!this.isFilteredLineIndex(i)) return i;
+    }
+    return undefined;
+  }
+
+  private findLastSelectableIndex(): number | undefined {
+    for (let i = this.lines.length - 1; i >= 0; i--) {
+      if (!this.isFilteredLineIndex(i)) return i;
+    }
+    return undefined;
+  }
+
+  private findNextSelectableIndex(from: number, direction: 1 | -1): number | undefined {
+    for (let i = from + direction; i >= 0 && i < this.lines.length; i += direction) {
+      if (!this.isFilteredLineIndex(i)) return i;
+    }
+    return undefined;
+  }
+
+  private ensureSelectionValid(): void {
+    if (this.selected >= 0 && this.selected < this.lines.length && !this.isFilteredLineIndex(this.selected)) {
+      if (this.anchor !== undefined && this.isFilteredLineIndex(this.anchor)) this.anchor = undefined;
+      return;
+    }
+
+    const forward = this.findNextSelectableIndex(Math.max(-1, Math.min(this.selected, this.lines.length - 1)), 1);
+    const backward = this.findNextSelectableIndex(Math.min(this.lines.length, Math.max(0, this.selected + 1)), -1);
+    this.selected = forward ?? backward ?? -1;
+
+    if (this.selected === -1 || (this.anchor !== undefined && this.isFilteredLineIndex(this.anchor))) {
+      this.anchor = undefined;
+    }
+  }
+
+  private isFilteredLineIndex(index: number): boolean {
+    const line = this.lines[index];
+    return line ? this.filteredRoles.has(line.role) : true;
   }
 
   private selectionBounds(): { start: number; end: number } | undefined {
-    if (this.anchor === undefined) return { start: this.selected, end: this.selected };
+    if (this.selected < 0) return undefined;
+    if (this.anchor === undefined || this.isFilteredLineIndex(this.anchor)) {
+      return { start: this.selected, end: this.selected };
+    }
     return { start: Math.min(this.anchor, this.selected), end: Math.max(this.anchor, this.selected) };
   }
 
   private currentSelection(): ContextLine[] {
     const bounds = this.selectionBounds();
-    if (!bounds) return [this.lines[this.selected]!];
-    return this.lines.slice(bounds.start, bounds.end + 1);
+    if (!bounds) return [];
+    return this.lines.slice(bounds.start, bounds.end + 1).filter((line) => !this.filteredRoles.has(line.role));
   }
 }
 

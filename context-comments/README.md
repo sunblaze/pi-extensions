@@ -13,6 +13,7 @@ Add comments to specific lines from your current Pi session context, then insert
 ## Features
 
 - Pick one or more context lines in a full-screen modal mode (like built-in full-view tools), with list/input panes sized to your terminal height
+- Filter context types in the picker (`t`), collapsing hidden sections into a single `[filtered N lines]` row per entry
 - In picker mode, press `s` to submit all saved comments immediately (available after at least one comment is saved)
 - Save comments per session branch
 - View and clear saved comments
@@ -63,6 +64,11 @@ You can also configure shortcuts from Pi:
 ```
 
 > Shortcut changes are loaded when the extension starts. Restart Pi after changing shortcut config.
+
+## Picker controls
+
+- `t` — Open context type filters
+- In filter mode: `space` toggles hidden/visible, `a` shows all, `enter`/`esc` returns to picker
 
 ## Notes
 
