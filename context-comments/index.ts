@@ -230,6 +230,24 @@ function fitToWidth(text: string, width: number): string {
   return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
 }
 
+function wrapTextToWidth(text: string, width: number): string[] {
+  const targetWidth = Math.max(1, width);
+  const lines: string[] = [];
+  let current = "";
+
+  for (const char of Array.from(text)) {
+    if (visibleWidth(`${current}${char}`) > targetWidth && current) {
+      lines.push(current);
+      current = char;
+    } else {
+      current += char;
+    }
+  }
+
+  lines.push(current);
+  return lines;
+}
+
 type PickerResult = "submit" | null;
 
 type DisplayRow =
@@ -377,23 +395,15 @@ class CommentPicker implements Component, Focusable {
     const visibleHeight = Math.max(3, totalHeight - fixedRows);
     this.lastVisibleHeight = visibleHeight;
 
-    const selectedDisplayIndex = this.selectedDisplayIndex(displayRows);
-    const start = Math.max(0, Math.min(selectedDisplayIndex - Math.floor(visibleHeight / 2), displayRows.length - visibleHeight));
-    const end = Math.min(displayRows.length, start + visibleHeight);
     const selection = this.selectionBounds();
 
-    const rendered: string[] = [border, fitToWidth(` ${header}  ${help}`, width)];
-
-    for (let i = start; i < end; i++) {
-      const row = displayRows[i]!;
-
+    const renderRow = (row: DisplayRow): string[] => {
       if (row.kind === "filtered") {
         const role = this.theme.fg("muted", row.role.padEnd(10).slice(0, 10));
         const range = row.startLine === row.endLine ? `${row.entryId}:${row.startLine}` : `${row.entryId}:${row.startLine}-${row.endLine}`;
         const loc = this.theme.fg("dim", range.padEnd(14).slice(0, 14));
         const text = this.theme.fg("dim", `[filtered ${row.count} line${row.count === 1 ? "" : "s"}]`);
-        rendered.push(fitToWidth(` ·  ${role} ${loc} ${text}`, width));
-        continue;
+        return [fitToWidth(` ·  ${role} ${loc} ${text}`, width)];
       }
 
       const line = row.line;
@@ -403,9 +413,48 @@ class CommentPicker implements Component, Focusable {
       const marker = isSelected ? "●" : wasCommented ? "○" : " ";
       const role = this.theme.fg("muted", line.role.padEnd(10).slice(0, 10));
       const loc = this.theme.fg("dim", `${line.entryId}:${line.lineNumber}`.padEnd(14).slice(0, 14));
-      let text = fitToWidth(`${isCursor ? "›" : " "}${marker} ${role} ${loc} ${sanitizeDisplayText(line.text)}`, width);
-      if (isCursor) text = this.theme.bg("selectedBg", text);
-      rendered.push(text);
+      const sanitized = sanitizeDisplayText(line.text);
+
+      if (!isCursor) return [fitToWidth(` ${marker} ${role} ${loc} ${sanitized}`, width)];
+
+      const prefix = `›${marker} ${role} ${loc} `;
+      const fullLine = `${prefix}${sanitized}`;
+      if (visibleWidth(fullLine) <= width) return [this.theme.bg("selectedBg", fitToWidth(fullLine, width))];
+
+      const continuationPrefix = `   ${" ".repeat(10)} ${" ".repeat(14)} `;
+      const bodyWidth = Math.max(1, width - visibleWidth(prefix));
+      return wrapTextToWidth(sanitized, bodyWidth).map((wrappedLine, wrappedIndex) => {
+        const linePrefix = wrappedIndex === 0 ? prefix : continuationPrefix;
+        return this.theme.bg("selectedBg", fitToWidth(`${linePrefix}${wrappedLine}`, width));
+      });
+    };
+
+    const rowHeights = displayRows.map((row) => renderRow(row).length);
+    const selectedDisplayIndex = this.selectedDisplayIndex(displayRows);
+    const selectedTop = rowHeights.slice(0, Math.max(0, selectedDisplayIndex)).reduce((sum, height) => sum + height, 0);
+    const selectedHeight = selectedDisplayIndex >= 0 ? rowHeights[selectedDisplayIndex]! : 1;
+    const totalRowHeight = rowHeights.reduce((sum, height) => sum + height, 0);
+    const maxStartOffset = Math.max(0, totalRowHeight - visibleHeight);
+    const startOffset = Math.max(
+      0,
+      Math.min(selectedTop - Math.max(0, Math.floor((visibleHeight - selectedHeight) / 2)), maxStartOffset),
+    );
+
+    const rendered: string[] = [border, fitToWidth(` ${header}  ${help}`, width)];
+    let consumedHeight = 0;
+
+    for (let i = 0; i < displayRows.length && consumedHeight < visibleHeight; i++) {
+      const rowLines = renderRow(displayRows[i]!);
+      const rowTop = rowHeights.slice(0, i).reduce((sum, height) => sum + height, 0);
+      const rowBottom = rowTop + rowLines.length;
+      if (rowBottom <= startOffset) continue;
+
+      const lineStart = Math.max(0, startOffset - rowTop);
+      for (const rowLine of rowLines.slice(lineStart)) {
+        if (consumedHeight >= visibleHeight) break;
+        rendered.push(rowLine);
+        consumedHeight++;
+      }
     }
 
     if (this.mode === "comment") {

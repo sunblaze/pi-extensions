@@ -14,6 +14,7 @@ Add comments to specific lines from your current Pi session context, then insert
 
 - Pick one or more context lines in a full-screen modal mode (like built-in full-view tools), with list/input panes sized to your terminal height
 - Filter context types in the picker (`t`), collapsing hidden sections into a single `[filtered N lines]` row per entry
+- Automatically wrap the currently highlighted overflowing line into paragraph form so long code lines can be read without horizontal scrolling
 - In picker mode, press `s` to submit all saved comments immediately (available after at least one comment is saved)
 - Save comments per session branch
 - View and clear saved comments
@@ -67,6 +68,7 @@ You can also configure shortcuts from Pi:
 
 ## Picker controls
 
+- Highlighted overflowing lines wrap automatically so long lines can be read in paragraph form
 - `t` — Open context type filters
 - In filter mode: `space` toggles hidden/visible, `a` shows all, `enter`/`esc` returns to picker
 
