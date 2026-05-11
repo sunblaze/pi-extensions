@@ -30,6 +30,11 @@ voice-to-text
   - VENICE_API_BASE (optional) — base URL for the Venice API. Default: https://api.venice.ai/api/v1
   - PI_VOICE_INPUT (optional) — avfoundation input device override (e.g. :0 or 0:0) to skip the prompt.
 
+footer-style
+- Use: Replaces Pi's footer with session path, model, context, token, and cost details. Optional working-token mode keeps the normal footer layout but makes the `$`, 🪙, ✨, and 💎 counters show accumulation since the current prompt started while the agent is working.
+- Commands: /footer-style [on|off|toggle|status|tokens|bar], /footer-tokens [on|off|toggle|status].
+- ENV: none.
+
 exit-alias
 - Use: Adds /exit as an alias for /quit.
 - ENV: none.
