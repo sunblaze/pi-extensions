@@ -259,6 +259,8 @@ type DisplayRow =
   | { kind: "filtered"; entryId: string; role: string; startLine: number; endLine: number; count: number };
 
 class CommentPicker implements Component, Focusable {
+  private static readonly EXPAND_DELAY_MS = 500;
+
   private selected: number;
   private anchor: number | undefined;
   private mode: "select" | "comment" | "filter" = "select";
@@ -266,6 +268,8 @@ class CommentPicker implements Component, Focusable {
   private _focused = false;
   private lastVisibleHeight = 14;
   private roleCursor = 0;
+  private expandedLineIndex = -1;
+  private expandTimer: ReturnType<typeof setTimeout> | undefined;
 
   private readonly commentedLineIds: Set<string>;
   private readonly availableRoles: string[];
@@ -291,6 +295,7 @@ class CommentPicker implements Component, Focusable {
     this.selected = this.findLastSelectableIndex() ?? -1;
     this.commentedLineIds = new Set(initiallyCommentedLineIds);
     this.configureInput();
+    this.scheduleExpansionForSelection();
   }
 
   get focused(): boolean {
@@ -369,6 +374,7 @@ class CommentPicker implements Component, Focusable {
     }
     if (matchesKey(data, Key.enter) && this.selected >= 0) {
       this.mode = "comment";
+      this.scheduleExpansionForSelection();
       this.input.focused = this.focused;
       this.tui.requestRender();
       return;
@@ -427,6 +433,10 @@ class CommentPicker implements Component, Focusable {
       const prefix = `›${marker} ${role} ${loc} `;
       const fullLine = `${prefix}${sanitized}`;
       if (visibleWidth(fullLine) <= width) return [this.theme.bg("selectedBg", fitToWidth(fullLine, width))];
+      if (this.expandedLineIndex !== row.lineIndex) {
+        this.scheduleExpansionForSelection();
+        return [this.theme.bg("selectedBg", fitToWidth(fullLine, width))];
+      }
 
       const continuationPrefix = `   ${" ".repeat(10)} ${" ".repeat(14)} `;
       const bodyWidth = Math.max(1, width - visibleWidth(prefix));
@@ -517,6 +527,7 @@ class CommentPicker implements Component, Focusable {
       }
       this.anchor = undefined;
       this.mode = "select";
+      this.scheduleExpansionForSelection();
       this.input = new Input();
       this.configureInput();
       this.input.focused = false;
@@ -524,6 +535,7 @@ class CommentPicker implements Component, Focusable {
     };
     this.input.onEscape = () => {
       this.mode = "select";
+      this.scheduleExpansionForSelection();
       this.input.focused = false;
       this.tui.requestRender();
     };
@@ -532,6 +544,7 @@ class CommentPicker implements Component, Focusable {
   private handleFilterInput(data: string): void {
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter) || data === "t") {
       this.mode = "select";
+      this.scheduleExpansionForSelection();
       this.tui.requestRender();
       return;
     }
@@ -572,6 +585,7 @@ class CommentPicker implements Component, Focusable {
 
   private enterFilterMode(): void {
     this.mode = "filter";
+    this.scheduleExpansionForSelection();
     if (this.selected >= 0) {
       const selectedRole = this.lines[this.selected]?.role;
       if (selectedRole) {
@@ -609,6 +623,7 @@ class CommentPicker implements Component, Focusable {
     const target = boundary === "start" ? this.findFirstSelectableIndex() : this.findLastSelectableIndex();
     if (target === undefined) return;
     this.selected = target;
+    this.scheduleExpansionForSelection();
     this.tui.requestRender();
   }
 
@@ -619,6 +634,7 @@ class CommentPicker implements Component, Focusable {
       const fallback = delta > 0 ? this.findFirstSelectableIndex() : this.findLastSelectableIndex();
       if (fallback === undefined) return;
       this.selected = fallback;
+      this.scheduleExpansionForSelection();
       this.tui.requestRender();
       return;
     }
@@ -634,6 +650,7 @@ class CommentPicker implements Component, Focusable {
 
     if (current !== this.selected) {
       this.selected = current;
+      this.scheduleExpansionForSelection();
       this.tui.requestRender();
     }
   }
@@ -731,6 +748,7 @@ class CommentPicker implements Component, Focusable {
     const forward = this.findNextSelectableIndex(Math.max(-1, Math.min(this.selected, this.lines.length - 1)), 1);
     const backward = this.findNextSelectableIndex(Math.min(this.lines.length, Math.max(0, this.selected + 1)), -1);
     this.selected = forward ?? backward ?? -1;
+    this.scheduleExpansionForSelection();
 
     if (this.selected === -1 || (this.anchor !== undefined && this.isFilteredLineIndex(this.anchor))) {
       this.anchor = undefined;
@@ -740,6 +758,25 @@ class CommentPicker implements Component, Focusable {
   private isFilteredLineIndex(index: number): boolean {
     const line = this.lines[index];
     return line ? this.filteredRoles.has(line.role) : true;
+  }
+
+  private scheduleExpansionForSelection(): void {
+    if (this.expandTimer) {
+      clearTimeout(this.expandTimer);
+      this.expandTimer = undefined;
+    }
+
+    this.expandedLineIndex = -1;
+
+    if (this.selected < 0 || this.mode !== "select") return;
+
+    const selectedIndex = this.selected;
+    this.expandTimer = setTimeout(() => {
+      this.expandTimer = undefined;
+      if (this.mode !== "select" || this.selected !== selectedIndex) return;
+      this.expandedLineIndex = selectedIndex;
+      this.tui.requestRender();
+    }, CommentPicker.EXPAND_DELAY_MS);
   }
 
   private selectionBounds(): { start: number; end: number } | undefined {
