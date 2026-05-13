@@ -321,7 +321,7 @@ function installCustomFooter(
 
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
-	let workingTokensModeEnabled = false;
+	let workingTokensModeEnabled = true;
 	let workingUsageBaseline: UsageSummary | undefined;
 	let workingCompletedUsage = zeroUsage();
 	let workingCurrentAssistantUsage: UsageSummary | undefined;
