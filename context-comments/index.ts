@@ -234,13 +234,17 @@ function wrapTextToWidth(text: string, width: number): string[] {
   const targetWidth = Math.max(1, width);
   const lines: string[] = [];
   let current = "";
+  let currentWidth = 0;
 
   for (const char of Array.from(text)) {
-    if (visibleWidth(`${current}${char}`) > targetWidth && current) {
+    const charWidth = visibleWidth(char);
+    if (currentWidth + charWidth > targetWidth && current) {
       lines.push(current);
       current = char;
+      currentWidth = charWidth;
     } else {
       current += char;
+      currentWidth += charWidth;
     }
   }
 
@@ -267,6 +271,8 @@ class CommentPicker implements Component, Focusable {
   private readonly availableRoles: string[];
   private readonly roleLineCounts: Map<string, number>;
   private readonly filteredRoles = new Set<string>();
+  private displayRowsCache: DisplayRow[] | undefined;
+  private displayIndexByLineIndex = new Map<number, number>();
 
   constructor(
     private readonly tui: TUI,
@@ -370,7 +376,7 @@ class CommentPicker implements Component, Focusable {
   }
 
   render(width: number): string[] {
-    const displayRows = this.buildDisplayRows();
+    const displayRows = this.getDisplayRows();
     const border = this.theme.fg("accent", "─".repeat(Math.max(0, width)));
     const header = this.theme.fg("accent", this.theme.bold("Add context comment"));
     const canSubmit = this.commentedLineIds.size > 0;
@@ -396,6 +402,7 @@ class CommentPicker implements Component, Focusable {
     this.lastVisibleHeight = visibleHeight;
 
     const selection = this.selectionBounds();
+    const selectedDisplayIndex = this.selectedDisplayIndex();
 
     const renderRow = (row: DisplayRow): string[] => {
       if (row.kind === "filtered") {
@@ -429,11 +436,9 @@ class CommentPicker implements Component, Focusable {
       });
     };
 
-    const rowHeights = displayRows.map((row) => renderRow(row).length);
-    const selectedDisplayIndex = this.selectedDisplayIndex(displayRows);
-    const selectedTop = rowHeights.slice(0, Math.max(0, selectedDisplayIndex)).reduce((sum, height) => sum + height, 0);
-    const selectedHeight = selectedDisplayIndex >= 0 ? rowHeights[selectedDisplayIndex]! : 1;
-    const totalRowHeight = rowHeights.reduce((sum, height) => sum + height, 0);
+    const selectedHeight = selectedDisplayIndex >= 0 ? renderRow(displayRows[selectedDisplayIndex]!).length : 1;
+    const selectedTop = Math.max(0, selectedDisplayIndex);
+    const totalRowHeight = displayRows.length + Math.max(0, selectedHeight - 1);
     const maxStartOffset = Math.max(0, totalRowHeight - visibleHeight);
     const startOffset = Math.max(
       0,
@@ -442,12 +447,16 @@ class CommentPicker implements Component, Focusable {
 
     const rendered: string[] = [border, fitToWidth(` ${header}  ${help}`, width)];
     let consumedHeight = 0;
+    let rowIndex = this.displayIndexAtOffset(startOffset, selectedDisplayIndex, selectedHeight);
+    let rowTop = this.offsetForDisplayIndex(rowIndex, selectedDisplayIndex, selectedHeight);
 
-    for (let i = 0; i < displayRows.length && consumedHeight < visibleHeight; i++) {
-      const rowLines = renderRow(displayRows[i]!);
-      const rowTop = rowHeights.slice(0, i).reduce((sum, height) => sum + height, 0);
+    for (; rowIndex < displayRows.length && consumedHeight < visibleHeight; rowIndex++) {
+      const rowLines = renderRow(displayRows[rowIndex]!);
       const rowBottom = rowTop + rowLines.length;
-      if (rowBottom <= startOffset) continue;
+      if (rowBottom <= startOffset) {
+        rowTop = rowBottom;
+        continue;
+      }
 
       const lineStart = Math.max(0, startOffset - rowTop);
       for (const rowLine of rowLines.slice(lineStart)) {
@@ -455,6 +464,7 @@ class CommentPicker implements Component, Focusable {
         rendered.push(rowLine);
         consumedHeight++;
       }
+      rowTop = rowBottom;
     }
 
     if (this.mode === "comment") {
@@ -554,6 +564,7 @@ class CommentPicker implements Component, Focusable {
     }
     if (data === "a") {
       this.filteredRoles.clear();
+      this.invalidateDisplayRows();
       this.ensureSelectionValid();
       this.tui.requestRender();
     }
@@ -581,6 +592,7 @@ class CommentPicker implements Component, Focusable {
       this.filteredRoles.add(role);
     }
 
+    this.invalidateDisplayRows();
     this.ensureSelectionValid();
     this.tui.requestRender();
   }
@@ -626,13 +638,27 @@ class CommentPicker implements Component, Focusable {
     }
   }
 
+  private invalidateDisplayRows(): void {
+    this.displayRowsCache = undefined;
+    this.displayIndexByLineIndex = new Map<number, number>();
+  }
+
+  private getDisplayRows(): DisplayRow[] {
+    if (!this.displayRowsCache) {
+      this.displayRowsCache = this.buildDisplayRows();
+    }
+    return this.displayRowsCache;
+  }
+
   private buildDisplayRows(): DisplayRow[] {
     const rows: DisplayRow[] = [];
+    const displayIndexes = new Map<number, number>();
 
     for (let i = 0; i < this.lines.length; ) {
       const line = this.lines[i]!;
 
       if (!this.filteredRoles.has(line.role)) {
+        displayIndexes.set(i, rows.length);
         rows.push({ kind: "line", line, lineIndex: i });
         i += 1;
         continue;
@@ -655,13 +681,24 @@ class CommentPicker implements Component, Focusable {
       rows.push({ kind: "filtered", entryId, role, startLine, endLine, count });
     }
 
+    this.displayIndexByLineIndex = displayIndexes;
     return rows;
   }
 
-  private selectedDisplayIndex(displayRows: DisplayRow[]): number {
-    if (displayRows.length === 0) return 0;
-    const idx = displayRows.findIndex((row) => row.kind === "line" && row.lineIndex === this.selected);
-    return idx >= 0 ? idx : 0;
+  private selectedDisplayIndex(): number {
+    if (this.selected < 0) return -1;
+    return this.displayIndexByLineIndex.get(this.selected) ?? -1;
+  }
+
+  private displayIndexAtOffset(offset: number, selectedDisplayIndex: number, selectedHeight: number): number {
+    if (selectedDisplayIndex < 0 || selectedHeight <= 1 || offset <= selectedDisplayIndex) return offset;
+    if (offset < selectedDisplayIndex + selectedHeight) return selectedDisplayIndex;
+    return offset - (selectedHeight - 1);
+  }
+
+  private offsetForDisplayIndex(displayIndex: number, selectedDisplayIndex: number, selectedHeight: number): number {
+    if (selectedDisplayIndex < 0 || selectedHeight <= 1 || displayIndex <= selectedDisplayIndex) return displayIndex;
+    return displayIndex + selectedHeight - 1;
   }
 
   private findFirstSelectableIndex(): number | undefined {
