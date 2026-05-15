@@ -26,7 +26,7 @@ const prefs: FooterPrefs = {
 	showSessionName: false,
 	showCost: true,
 	showContextUsage: true,
-	showUtcTime: true,
+	showUtcTime: false,
 	showModel: true,
 	showThinking: true,
 	showProviderWhenMultiple: true,
