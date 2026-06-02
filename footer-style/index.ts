@@ -72,6 +72,35 @@ function formatUtcNow(): string {
 	return `${hh}:${mm}:${ss} UTC`;
 }
 
+function getModelEmoji(modelId: string): string {
+	const normalized = modelId.toLowerCase();
+	const versionMatch = normalized.match(/(?:^|[^a-z0-9])(\d+(?:\.\d+)+)(?:[^a-z0-9]|$)/);
+	const majorVersionMatch = normalized.match(/(?:^|[^a-z0-9])(?:gpt-?|claude-?|gemini-?|grok-?|llama-?|mistral-?|qwen-?|deepseek-?|codex-?)(\d+)(?:[^a-z0-9]|$)/);
+	const version = versionMatch?.[1] ?? majorVersionMatch?.[1];
+
+	if (normalized.includes("codex")) {
+		if (version?.startsWith("5.5")) return "🛸";
+		if (version?.startsWith("5.4")) return "🛰️";
+		if (version?.startsWith("5.3")) return "🤖";
+		if (version?.startsWith("5")) return "⚙️";
+		return "🔩";
+	}
+
+	if (normalized.includes("gpt-5")) return "🧠";
+	if (normalized.includes("gpt-4")) return "🌀";
+	if (normalized.includes("claude")) return version?.startsWith("4") ? "🌲" : "🌿";
+	if (normalized.includes("gemini")) return version?.startsWith("2.5") ? "🔷" : "💎";
+	if (normalized.includes("grok")) return version?.startsWith("4") ? "🧨" : "🚀";
+	if (normalized.includes("llama")) return version?.startsWith("4") ? "🐏" : "🦙";
+	if (normalized.includes("mistral")) return version?.startsWith("2") ? "💨" : "🌬️";
+	if (normalized.includes("qwen")) return version?.startsWith("3") ? "🧮" : "🧩";
+	if (normalized.includes("deepseek")) return version?.startsWith("3") ? "🧭" : "🔎";
+	if (normalized.includes("o3")) return "🔬";
+	if (normalized.includes("o4")) return "⚗️";
+
+	return "✨";
+}
+
 function summarizeAssistantMessage(message: AssistantMessage): UsageSummary {
 	return {
 		input: message.usage.input,
@@ -263,16 +292,14 @@ function installCustomFooter(
 
 				if (prefs.showModel) {
 					const modelName = ctx.model?.id || "no-model";
-					let modelText = modelName;
+					const modelEmoji = getModelEmoji(modelName);
+					let modelText = `${modelEmoji} ${modelName}`;
 
 					if (prefs.showThinking && ctx.model?.reasoning) {
 						const thinking = pi.getThinkingLevel();
-						modelText = thinking === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinking}`;
+						modelText = thinking === "off" ? `${modelText} • thinking off` : `${modelText} • ${thinking}`;
 					}
 
-					if (prefs.showProviderWhenMultiple && footerData.getAvailableProviderCount() > 1 && ctx.model) {
-						modelText = `(${ctx.model.provider}) ${modelText}`;
-					}
 
 					rightParts.push(modelText);
 				}
