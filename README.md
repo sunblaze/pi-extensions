@@ -6,7 +6,7 @@ Extensions
 
 announcer-input-alert
 - Use: Plays a random announcer sound when the assistant finishes a text response.
-- Commands: /announcer-rate, /announcer-ratings
+- Commands: /announcer rate [1-5], /announcer ratings, /announcer weights
 - Files: sounds in `announcer-input-alert/sounds`; local rating stats in `announcer-input-alert/ratings.json` (gitignored).
 
 clipboard-last-assistant

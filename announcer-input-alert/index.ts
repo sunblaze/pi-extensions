@@ -113,6 +113,44 @@ function pickSoundByRatings(soundPaths: string[], store: RatingsStore): string |
 	return entries[entries.length - 1]?.soundPath;
 }
 
+function averageRating(stats: SoundRatingStats): number | undefined {
+	const total = totalRatings(stats);
+	if (total === 0) return undefined;
+	const weightedTotal =
+		stats.ratings["1"] * 1 +
+		stats.ratings["2"] * 2 +
+		stats.ratings["3"] * 3 +
+		stats.ratings["4"] * 4 +
+		stats.ratings["5"] * 5;
+	return weightedTotal / total;
+}
+
+function formatWeightsDebug(soundPaths: string[], store: RatingsStore): string {
+	if (soundPaths.length === 0) return `No sounds found in ${SOUNDS_DIR}`;
+
+	const rows = soundPaths
+		.map((soundPath) => {
+			const soundName = basename(soundPath);
+			const stats = store.sounds[soundName] ?? emptyRatingStats();
+			return {
+				soundName,
+				plays: stats.plays,
+				totalRatings: totalRatings(stats),
+				avgRating: averageRating(stats),
+				weight: ratingWeight(stats),
+				ratings: stats.ratings,
+			};
+		})
+		.sort((a, b) => b.weight - a.weight || b.totalRatings - a.totalRatings || a.soundName.localeCompare(b.soundName));
+
+	return rows
+		.map((row, index) => {
+			const avg = row.avgRating ? row.avgRating.toFixed(2) : "n/a";
+			return `${String(index + 1).padStart(2, " ")}. ${row.soundName}\n    weight=${row.weight.toFixed(2)} avg=${avg} ratings=${row.totalRatings} plays=${row.plays} [1:${row.ratings["1"]} 2:${row.ratings["2"]} 3:${row.ratings["3"]} 4:${row.ratings["4"]} 5:${row.ratings["5"]}]`;
+		})
+		.join("\n");
+}
+
 function getAvailablePlayer(): string | undefined {
 	const players = ["afplay", "paplay", "aplay", "ffplay"] as const;
 
@@ -166,38 +204,66 @@ export default function announcerInputAlert(pi: ExtensionAPI) {
 		pendingSound = undefined;
 	}
 
-	pi.registerCommand("announcer-rate", {
-		description: "Rate the last played announcer sound from 1 to 5 stars",
+	const commandUsage = [
+		"Usage:",
+		"  /announcer rate [1-5]",
+		"  /announcer ratings",
+		"  /announcer weights",
+		"  /announcer help",
+	].join("\n");
+
+	pi.registerCommand("announcer", {
+		description: "Manage announcer sounds (rate, ratings, weights)",
 		handler: async (args, ctx) => {
-			if (!lastPlayedSound) {
-				ctx.ui.notify("announcer-input-alert: no sound has played yet in this session", "warning");
+			const trimmed = args.trim();
+			const inlineRating = parseRating(trimmed);
+			const [subcommandRaw, ...rest] = trimmed.split(/\s+/).filter(Boolean);
+			const subcommand = (inlineRating ? "rate" : subcommandRaw ?? "help").toLowerCase();
+			const subArgs = inlineRating ? String(inlineRating) : rest.join(" ").trim();
+
+			if (subcommand === "rate") {
+				if (!lastPlayedSound) {
+					ctx.ui.notify("announcer-input-alert: no sound has played yet in this session", "warning");
+					return;
+				}
+
+				let rating = parseRating(subArgs);
+				if (!rating) {
+					const choice = await ctx.ui.select(
+						`Rate ${basename(lastPlayedSound)}:`,
+						["★★★★★ 5", "★★★★☆ 4", "★★★☆☆ 3", "★★☆☆☆ 2", "★☆☆☆☆ 1"],
+					);
+					rating = choice ? parseRating(choice.slice(-1)) : undefined;
+				}
+				if (!rating) return;
+
+				const store = loadRatings();
+				const soundName = basename(lastPlayedSound);
+				const stats = statsFor(store, soundName);
+				stats.ratings[String(rating) as keyof SoundRatingStats["ratings"]]++;
+				stats.history.push({ rating, ratedAt: new Date().toISOString() });
+				saveRatings(store);
+				ctx.ui.notify(`announcer-input-alert: rated ${soundName} ${rating}/5 (${stats.ratings[String(rating) as keyof SoundRatingStats["ratings"]]}x)`, "success");
 				return;
 			}
 
-			let rating = parseRating(args);
-			if (!rating) {
-				const choice = await ctx.ui.select(
-					`Rate ${basename(lastPlayedSound)}:`,
-					["★★★★★ 5", "★★★★☆ 4", "★★★☆☆ 3", "★★☆☆☆ 2", "★☆☆☆☆ 1"],
-				);
-				rating = choice ? parseRating(choice.slice(-1)) : undefined;
+			if (subcommand === "ratings") {
+				ctx.ui.notify(`announcer-input-alert ratings: ${RATINGS_FILE}`, "info");
+				return;
 			}
-			if (!rating) return;
 
-			const store = loadRatings();
-			const soundName = basename(lastPlayedSound);
-			const stats = statsFor(store, soundName);
-			stats.ratings[String(rating) as keyof SoundRatingStats["ratings"]]++;
-			stats.history.push({ rating, ratedAt: new Date().toISOString() });
-			saveRatings(store);
-			ctx.ui.notify(`announcer-input-alert: rated ${soundName} ${rating}/5 (${stats.ratings[String(rating) as keyof SoundRatingStats["ratings"]]}x)`, "success");
-		},
-	});
+			if (subcommand === "weights") {
+				const store = loadRatings();
+				await ctx.ui.editor("announcer-input-alert weights", formatWeightsDebug(sounds, store));
+				return;
+			}
 
-	pi.registerCommand("announcer-ratings", {
-		description: "Show where announcer sound ratings are stored",
-		handler: async (_args, ctx) => {
-			ctx.ui.notify(`announcer-input-alert ratings: ${RATINGS_FILE}`, "info");
+			if (subcommand === "help") {
+				ctx.ui.notify(commandUsage, "info");
+				return;
+			}
+
+			ctx.ui.notify(`Unknown subcommand: ${subcommand}\n\n${commandUsage}`, "warning");
 		},
 	});
 
@@ -249,7 +315,7 @@ export default function announcerInputAlert(pi: ExtensionAPI) {
 			const stats = statsFor(store, basename(soundToPlay));
 			stats.plays++;
 			saveRatings(store);
-			ctx.ui.notify(`announcer-input-alert: played ${basename(soundToPlay)}. Rate it with /announcer-rate 1-5`, "info");
+			ctx.ui.notify(`announcer-input-alert: played ${basename(soundToPlay)}. Rate it with /announcer rate 1-5`, "info");
 		}, 2000);
 	});
 }
