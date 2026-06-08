@@ -71,6 +71,48 @@ function pickRandom<T>(items: T[]): T | undefined {
 	return items[Math.floor(Math.random() * items.length)];
 }
 
+function totalRatings(stats: SoundRatingStats): number {
+	return Object.values(stats.ratings).reduce((sum, count) => sum + count, 0);
+}
+
+function ratingWeight(stats: SoundRatingStats): number {
+	const total = totalRatings(stats);
+	const weightedTotal =
+		stats.ratings["1"] * 1 +
+		stats.ratings["2"] * 2 +
+		stats.ratings["3"] * 3 +
+		stats.ratings["4"] * 4 +
+		stats.ratings["5"] * 5;
+
+	const priorMean = 3;
+	const priorWeight = 2;
+	const posteriorMean = (weightedTotal + priorMean * priorWeight) / (total + priorWeight);
+	const meanFactor = posteriorMean / priorMean;
+	const confidenceFactor = Math.min(1.5, 1 + total / 10);
+	return Math.max(0.15, meanFactor * confidenceFactor);
+}
+
+function pickSoundByRatings(soundPaths: string[], store: RatingsStore): string | undefined {
+	if (soundPaths.length === 0) return undefined;
+
+	const entries = soundPaths.map((soundPath) => {
+		const soundName = basename(soundPath);
+		const stats = store.sounds[soundName] ?? emptyRatingStats();
+		return { soundPath, weight: ratingWeight(stats) };
+	});
+
+	const totalWeight = entries.reduce((sum, entry) => sum + entry.weight, 0);
+	if (totalWeight <= 0) return pickRandom(soundPaths);
+
+	let roll = Math.random() * totalWeight;
+	for (const entry of entries) {
+		roll -= entry.weight;
+		if (roll <= 0) return entry.soundPath;
+	}
+
+	return entries[entries.length - 1]?.soundPath;
+}
+
 function getAvailablePlayer(): string | undefined {
 	const players = ["afplay", "paplay", "aplay", "ffplay"] as const;
 
@@ -114,7 +156,6 @@ function assistantFinishedWithText(messages: unknown): boolean {
 export default function announcerInputAlert(pi: ExtensionAPI) {
 	const sounds = loadSoundFiles();
 	const player = getAvailablePlayer();
-	let selectedSound = pickRandom(sounds);
 	let lastPlayedSound: string | undefined;
 	let pendingToolExecutions = 0;
 	let pendingSound: NodeJS.Timeout | undefined;
@@ -161,7 +202,6 @@ export default function announcerInputAlert(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async () => {
-		selectedSound = pickRandom(sounds);
 		lastPlayedSound = undefined;
 		pendingToolExecutions = 0;
 		cancelPendingSound();
@@ -192,22 +232,24 @@ export default function announcerInputAlert(pi: ExtensionAPI) {
 			pendingSound = undefined;
 			if (!ctx.isIdle() || ctx.hasPendingMessages() || pendingToolExecutions > 0) return;
 
-			if (!selectedSound) {
-				ctx.ui.notify(`announcer-input-alert: no sound files found in ${SOUNDS_DIR}`, "warning");
-				return;
-			}
 			if (!player) {
 				ctx.ui.notify("announcer-input-alert: no supported audio player found (afplay/paplay/aplay/ffplay)", "warning");
 				return;
 			}
 
-			playSound(player, selectedSound);
-			lastPlayedSound = selectedSound;
 			const store = loadRatings();
-			const stats = statsFor(store, basename(selectedSound));
+			const soundToPlay = pickSoundByRatings(sounds, store);
+			if (!soundToPlay) {
+				ctx.ui.notify(`announcer-input-alert: no sound files found in ${SOUNDS_DIR}`, "warning");
+				return;
+			}
+
+			playSound(player, soundToPlay);
+			lastPlayedSound = soundToPlay;
+			const stats = statsFor(store, basename(soundToPlay));
 			stats.plays++;
 			saveRatings(store);
-			ctx.ui.notify(`announcer-input-alert: played ${basename(selectedSound)}. Rate it with /announcer-rate 1-5`, "info");
+			ctx.ui.notify(`announcer-input-alert: played ${basename(soundToPlay)}. Rate it with /announcer-rate 1-5`, "info");
 		}, 2000);
 	});
 }
