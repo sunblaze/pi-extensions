@@ -1,0 +1,213 @@
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn, spawnSync } from "node:child_process";
+
+const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
+const SOUNDS_DIR = join(EXTENSION_DIR, "sounds");
+const RATINGS_FILE = join(EXTENSION_DIR, "ratings.json");
+
+type SoundRatingStats = {
+	plays: number;
+	ratings: Record<"1" | "2" | "3" | "4" | "5", number>;
+	history: Array<{ rating: 1 | 2 | 3 | 4 | 5; ratedAt: string }>;
+};
+
+type RatingsStore = {
+	version: 1;
+	sounds: Record<string, SoundRatingStats>;
+};
+
+function emptyRatingStats(): SoundRatingStats {
+	return {
+		plays: 0,
+		ratings: { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 },
+		history: [],
+	};
+}
+
+function loadRatings(): RatingsStore {
+	try {
+		if (!existsSync(RATINGS_FILE)) return { version: 1, sounds: {} };
+		const parsed = JSON.parse(readFileSync(RATINGS_FILE, "utf8")) as RatingsStore;
+		return parsed?.version === 1 && parsed.sounds ? parsed : { version: 1, sounds: {} };
+	} catch {
+		return { version: 1, sounds: {} };
+	}
+}
+
+function saveRatings(store: RatingsStore): void {
+	mkdirSync(dirname(RATINGS_FILE), { recursive: true });
+	writeFileSync(RATINGS_FILE, `${JSON.stringify(store, null, 2)}\n`);
+}
+
+function statsFor(store: RatingsStore, soundName: string): SoundRatingStats {
+	store.sounds[soundName] ??= emptyRatingStats();
+	store.sounds[soundName].ratings ??= emptyRatingStats().ratings;
+	store.sounds[soundName].history ??= [];
+	store.sounds[soundName].plays ??= 0;
+	return store.sounds[soundName];
+}
+
+function parseRating(raw: string): 1 | 2 | 3 | 4 | 5 | undefined {
+	const match = raw.trim().match(/^[1-5]/);
+	if (!match) return undefined;
+	return Number(match[0]) as 1 | 2 | 3 | 4 | 5;
+}
+
+function loadSoundFiles(): string[] {
+	try {
+		return readdirSync(SOUNDS_DIR)
+			.filter((file) => /\.(wav|mp3|aiff|m4a)$/i.test(file))
+			.map((file) => join(SOUNDS_DIR, file));
+	} catch {
+		return [];
+	}
+}
+
+function pickRandom<T>(items: T[]): T | undefined {
+	if (items.length === 0) return undefined;
+	return items[Math.floor(Math.random() * items.length)];
+}
+
+function getAvailablePlayer(): string | undefined {
+	const players = ["afplay", "paplay", "aplay", "ffplay"] as const;
+
+	for (const cmd of players) {
+		const lookup = spawnSync("which", [cmd], { stdio: "ignore" });
+		if (lookup.status === 0) return cmd;
+	}
+
+	return undefined;
+}
+
+function playSound(player: string, path: string): void {
+	const args =
+		player === "ffplay"
+			? ["-nodisp", "-autoexit", "-loglevel", "quiet", path]
+			: [path];
+
+	const child = spawn(player, args, {
+		stdio: "ignore",
+		detached: true,
+	});
+	child.unref();
+}
+
+function assistantFinishedWithText(messages: unknown): boolean {
+	if (!Array.isArray(messages)) return false;
+
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = (messages[i] as { role?: string; content?: unknown }) ?? {};
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+
+		return message.content.some((part) => {
+			const contentPart = part as { type?: string; text?: unknown };
+			return contentPart.type === "text" && typeof contentPart.text === "string" && contentPart.text.trim().length > 0;
+		});
+	}
+
+	return false;
+}
+
+export default function announcerInputAlert(pi: ExtensionAPI) {
+	const sounds = loadSoundFiles();
+	const player = getAvailablePlayer();
+	let selectedSound = pickRandom(sounds);
+	let lastPlayedSound: string | undefined;
+	let pendingToolExecutions = 0;
+	let pendingSound: NodeJS.Timeout | undefined;
+
+	function cancelPendingSound(): void {
+		if (!pendingSound) return;
+		clearTimeout(pendingSound);
+		pendingSound = undefined;
+	}
+
+	pi.registerCommand("announcer-rate", {
+		description: "Rate the last played announcer sound from 1 to 5 stars",
+		handler: async (args, ctx) => {
+			if (!lastPlayedSound) {
+				ctx.ui.notify("announcer-input-alert: no sound has played yet in this session", "warning");
+				return;
+			}
+
+			let rating = parseRating(args);
+			if (!rating) {
+				const choice = await ctx.ui.select(
+					`Rate ${basename(lastPlayedSound)}:`,
+					["★★★★★ 5", "★★★★☆ 4", "★★★☆☆ 3", "★★☆☆☆ 2", "★☆☆☆☆ 1"],
+				);
+				rating = choice ? parseRating(choice.slice(-1)) : undefined;
+			}
+			if (!rating) return;
+
+			const store = loadRatings();
+			const soundName = basename(lastPlayedSound);
+			const stats = statsFor(store, soundName);
+			stats.ratings[String(rating) as keyof SoundRatingStats["ratings"]]++;
+			stats.history.push({ rating, ratedAt: new Date().toISOString() });
+			saveRatings(store);
+			ctx.ui.notify(`announcer-input-alert: rated ${soundName} ${rating}/5 (${stats.ratings[String(rating) as keyof SoundRatingStats["ratings"]]}x)`, "success");
+		},
+	});
+
+	pi.registerCommand("announcer-ratings", {
+		description: "Show where announcer sound ratings are stored",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify(`announcer-input-alert ratings: ${RATINGS_FILE}`, "info");
+		},
+	});
+
+	pi.on("session_start", async () => {
+		selectedSound = pickRandom(sounds);
+		lastPlayedSound = undefined;
+		pendingToolExecutions = 0;
+		cancelPendingSound();
+	});
+
+	pi.on("agent_start", async () => {
+		cancelPendingSound();
+	});
+
+	pi.on("tool_execution_start", async () => {
+		cancelPendingSound();
+		pendingToolExecutions++;
+	});
+
+	pi.on("tool_execution_end", async () => {
+		pendingToolExecutions = Math.max(0, pendingToolExecutions - 1);
+	});
+
+	pi.on("session_shutdown", async () => {
+		cancelPendingSound();
+	});
+
+	pi.on("agent_end", async (event, ctx) => {
+		cancelPendingSound();
+		if (!assistantFinishedWithText((event as { messages?: unknown }).messages)) return;
+
+		pendingSound = setTimeout(() => {
+			pendingSound = undefined;
+			if (!ctx.isIdle() || ctx.hasPendingMessages() || pendingToolExecutions > 0) return;
+
+			if (!selectedSound) {
+				ctx.ui.notify(`announcer-input-alert: no sound files found in ${SOUNDS_DIR}`, "warning");
+				return;
+			}
+			if (!player) {
+				ctx.ui.notify("announcer-input-alert: no supported audio player found (afplay/paplay/aplay/ffplay)", "warning");
+				return;
+			}
+
+			playSound(player, selectedSound);
+			lastPlayedSound = selectedSound;
+			const store = loadRatings();
+			const stats = statsFor(store, basename(selectedSound));
+			stats.plays++;
+			saveRatings(store);
+			ctx.ui.notify(`announcer-input-alert: played ${basename(selectedSound)}. Rate it with /announcer-rate 1-5`, "info");
+		}, 2000);
+	});
+}

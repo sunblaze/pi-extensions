@@ -27,3 +27,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 .DS_Store
+
+# Extension runtime data
+announcer-input-alert/ratings.json
+
+# Local/proprietary audio assets
+announcer-input-alert/sounds/*.wav

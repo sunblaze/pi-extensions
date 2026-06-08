@@ -7,10 +7,12 @@
   ],
   "pi": {
     "extensions": [
+      "./announcer-input-alert/index.ts",
       "./clipboard-last-assistant.ts",
       "./context-comments/index.ts",
       "./exit-alias.ts",
       "./footer-style/index.ts",
+      "./moon-pi/index.ts",
       "./pi-stopwatch/index.ts",
       "./ppq-provider/index.ts",
       "./session-files/index.ts",

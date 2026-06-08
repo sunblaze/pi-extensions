@@ -4,6 +4,11 @@ My extensions for my agent harness.
 
 Extensions
 
+announcer-input-alert
+- Use: Plays a random announcer sound when the assistant finishes a text response.
+- Commands: /announcer-rate, /announcer-ratings
+- Files: sounds in `announcer-input-alert/sounds`; local rating stats in `announcer-input-alert/ratings.json` (gitignored).
+
 clipboard-last-assistant
 - Use: Copies the last assistant text output on the current branch to the macOS clipboard.
 - Commands: /cp
@@ -34,6 +39,11 @@ footer-style
 - Use: Replaces Pi's footer with session path, model, context, token, and cost details. Optional working-token mode keeps the normal footer layout but makes the `$`, 🪙, ✨, and 💎 counters show accumulation since the current prompt started while the agent is working.
 - Commands: /footer-style [on|off|toggle|status|tokens|bar], /footer-tokens [on|off|toggle|status].
 - ENV: none.
+
+moon-pi
+- Use: Bootstraps an EPOCH workflow and prints EPOCH setup steps when no EPOCH is active and no EPOCH plan file exists.
+- Commands: /moon-pi
+- Files checked in current repo: .moon-pi/epoch-plan.md, .moon-pi/epoch.json
 
 exit-alias
 - Use: Adds /exit as an alias for /quit.
