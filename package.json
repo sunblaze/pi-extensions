@@ -15,6 +15,7 @@
       "./moon-pi/index.ts",
       "./pi-stopwatch/index.ts",
       "./ppq-provider/index.ts",
+      "./skill-gate/index.ts",
       "./session-files/index.ts",
       "./venice-provider/index.ts",
       "./voice-to-text/index.ts"

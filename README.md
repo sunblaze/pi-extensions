@@ -40,6 +40,11 @@ footer-style
 - Commands: /footer-style [on|off|toggle|status|tokens|bar], /footer-tokens [on|off|toggle|status].
 - ENV: none.
 
+skill-gate
+- Use: Prompts the first time an agent tries to load a skill via `/skill:name` or by reading its skill file, then allows it for the current session or persistently allows/denies future use.
+- Commands: /skill-gate, /skill-gate allow-session <skill>, /skill-gate allow <skill>, /skill-gate deny <skill>, /skill-gate forget <skill>, /skill-gate reset
+- Config: ~/.pi/agent/extensions/skill-gate/decisions.json.
+
 moon-pi
 - Use: Bootstraps an EPOCH workflow and prints EPOCH setup steps when no EPOCH is active and no EPOCH plan file exists.
 - Commands: /moon-pi

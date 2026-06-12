@@ -195,6 +195,7 @@ export default function announcerInputAlert(pi: ExtensionAPI) {
 	const sounds = loadSoundFiles();
 	const player = getAvailablePlayer();
 	let lastPlayedSound: string | undefined;
+	let sessionSound: string | undefined;
 	let pendingToolExecutions = 0;
 	let pendingSound: NodeJS.Timeout | undefined;
 
@@ -269,6 +270,7 @@ export default function announcerInputAlert(pi: ExtensionAPI) {
 
 	pi.on("session_start", async () => {
 		lastPlayedSound = undefined;
+		sessionSound = undefined;
 		pendingToolExecutions = 0;
 		cancelPendingSound();
 	});
@@ -304,7 +306,8 @@ export default function announcerInputAlert(pi: ExtensionAPI) {
 			}
 
 			const store = loadRatings();
-			const soundToPlay = pickSoundByRatings(sounds, store);
+			sessionSound ??= pickSoundByRatings(sounds, store);
+			const soundToPlay = sessionSound;
 			if (!soundToPlay) {
 				ctx.ui.notify(`announcer-input-alert: no sound files found in ${SOUNDS_DIR}`, "warning");
 				return;
