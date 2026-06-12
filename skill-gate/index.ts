@@ -20,9 +20,12 @@ const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROMPT_SOUND_PATH = path.resolve(EXTENSION_DIR, "..", "announcer-input-alert", "sounds", "prepare.wav");
 const SKILLS_SECTION_START = "\n\nThe following skills provide specialized instructions for specific tasks.";
 const SKILLS_SECTION_END = "</available_skills>";
+const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const DECISION_LABEL_WIDTH = 14;
 
 type GlobalDecision = "allow" | "deny";
-type EffectiveDecision = GlobalDecision | "session-allow";
+type SessionDecision = "allow" | "deny";
+type EffectiveDecision = GlobalDecision | "session-allow" | "session-deny";
 
 type DecisionRecord = {
 	decision: GlobalDecision;
@@ -33,10 +36,11 @@ type DecisionRecord = {
 	source?: string;
 	scope?: string;
 	updatedAt: string;
+	expiresAt?: string;
 };
 
-type SessionAllowRecord = {
-	decision: "allow";
+type SessionDecisionRecord = {
+	decision: SessionDecision;
 	name: string;
 	filePath: string;
 	baseDir: string;
@@ -47,9 +51,10 @@ type SessionAllowRecord = {
 };
 
 type DecisionStore = {
-	version: 1;
+	version: 2;
 	decisions: Record<string, DecisionRecord>;
-	sessionAllows: Record<string, Record<string, SessionAllowRecord>>;
+	sessionAllows: Record<string, Record<string, SessionDecisionRecord>>;
+	sessionDenies: Record<string, Record<string, SessionDecisionRecord>>;
 };
 
 type SkillSummary = {
@@ -70,7 +75,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function emptyStore(): DecisionStore {
-	return { version: 1, decisions: {}, sessionAllows: {} };
+	return { version: 2, decisions: {}, sessionAllows: {}, sessionDenies: {} };
+}
+
+function parseExpiresAt(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const timestamp = Date.parse(value);
+	return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
 }
 
 function parseDecisionRecord(value: unknown): DecisionRecord | undefined {
@@ -87,15 +98,16 @@ function parseDecisionRecord(value: unknown): DecisionRecord | undefined {
 		source: typeof value.source === "string" ? value.source : undefined,
 		scope: typeof value.scope === "string" ? value.scope : undefined,
 		updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date().toISOString(),
+		expiresAt: parseExpiresAt(value.expiresAt),
 	};
 }
 
-function parseSessionAllowRecord(value: unknown): SessionAllowRecord | undefined {
+function parseSessionDecisionRecord(value: unknown, expectedDecision: SessionDecision): SessionDecisionRecord | undefined {
 	const parsed = parseDecisionRecord(value);
-	if (!parsed || parsed.decision !== "allow") return undefined;
+	if (!parsed || parsed.decision !== expectedDecision) return undefined;
 
 	return {
-		decision: "allow",
+		decision: expectedDecision,
 		name: parsed.name,
 		filePath: parsed.filePath,
 		baseDir: parsed.baseDir,
@@ -104,6 +116,16 @@ function parseSessionAllowRecord(value: unknown): SessionAllowRecord | undefined
 		scope: parsed.scope,
 		updatedAt: parsed.updatedAt,
 	};
+}
+
+function isExpired(record: DecisionRecord): boolean {
+	if (!record.expiresAt) return false;
+	const timestamp = Date.parse(record.expiresAt);
+	return Number.isFinite(timestamp) && timestamp <= Date.now();
+}
+
+function oneWeekFromNow(): string {
+	return new Date(Date.now() + ONE_WEEK_MS).toISOString();
 }
 
 function readDecisionStore(): DecisionStore {
@@ -125,12 +147,24 @@ function readDecisionStore(): DecisionStore {
 		if (isRecord(parsed.sessionAllows)) {
 			for (const [sessionId, sessionValue] of Object.entries(parsed.sessionAllows)) {
 				if (!isRecord(sessionValue)) continue;
-				const sessionRecords: Record<string, SessionAllowRecord> = {};
+				const sessionRecords: Record<string, SessionDecisionRecord> = {};
 				for (const [key, value] of Object.entries(sessionValue)) {
-					const record = parseSessionAllowRecord(value);
+					const record = parseSessionDecisionRecord(value, "allow");
 					if (record) sessionRecords[key] = record;
 				}
 				if (Object.keys(sessionRecords).length > 0) store.sessionAllows[sessionId] = sessionRecords;
+			}
+		}
+
+		if (isRecord(parsed.sessionDenies)) {
+			for (const [sessionId, sessionValue] of Object.entries(parsed.sessionDenies)) {
+				if (!isRecord(sessionValue)) continue;
+				const sessionRecords: Record<string, SessionDecisionRecord> = {};
+				for (const [key, value] of Object.entries(sessionValue)) {
+					const record = parseSessionDecisionRecord(value, "deny");
+					if (record) sessionRecords[key] = record;
+				}
+				if (Object.keys(sessionRecords).length > 0) store.sessionDenies[sessionId] = sessionRecords;
 			}
 		}
 
@@ -219,7 +253,7 @@ function decisionToSkillSummary(record: DecisionRecord): SkillSummary {
 	};
 }
 
-function sessionAllowToSkillSummary(record: SessionAllowRecord): SkillSummary {
+function sessionDecisionToSkillSummary(record: SessionDecisionRecord): SkillSummary {
 	return {
 		name: record.name,
 		description: record.description ?? "",
@@ -318,29 +352,121 @@ export default function (pi: ExtensionAPI) {
 		return ctx.sessionManager.getSessionId();
 	}
 
-	function sessionAllowsFor(ctx: ExtensionContext): Record<string, SessionAllowRecord> {
+	function sessionAllowsFor(ctx: ExtensionContext): Record<string, SessionDecisionRecord> {
 		const id = sessionId(ctx);
 		decisions.sessionAllows[id] ??= {};
 		return decisions.sessionAllows[id];
 	}
 
-	function getGlobalDecision(skill: SkillSummary): GlobalDecision | undefined {
-		return decisions.decisions[skillKey(skill)]?.decision;
+	function sessionDeniesFor(ctx: ExtensionContext): Record<string, SessionDecisionRecord> {
+		const id = sessionId(ctx);
+		decisions.sessionDenies[id] ??= {};
+		return decisions.sessionDenies[id];
+	}
+
+	function existingSessionAllowsFor(ctx: ExtensionContext): Record<string, SessionDecisionRecord> | undefined {
+		return decisions.sessionAllows[sessionId(ctx)];
+	}
+
+	function existingSessionDeniesFor(ctx: ExtensionContext): Record<string, SessionDecisionRecord> | undefined {
+		return decisions.sessionDenies[sessionId(ctx)];
+	}
+
+	function deleteSessionDecision(ctx: ExtensionContext, key: string): void {
+		const id = sessionId(ctx);
+		const allows = decisions.sessionAllows[id];
+		if (allows) {
+			delete allows[key];
+			if (Object.keys(allows).length === 0) delete decisions.sessionAllows[id];
+		}
+
+		const denies = decisions.sessionDenies[id];
+		if (denies) {
+			delete denies[key];
+			if (Object.keys(denies).length === 0) delete decisions.sessionDenies[id];
+		}
+	}
+
+	function pruneExpiredDecisions(ctx?: ExtensionContext): void {
+		let changed = false;
+		for (const [key, record] of Object.entries(decisions.decisions)) {
+			if (!isExpired(record)) continue;
+			delete decisions.decisions[key];
+			changed = true;
+		}
+
+		if (!changed) return;
+		writeDecisionStore(decisions, ctx);
+		updateStatus(ctx);
+	}
+
+	function getGlobalDecisionRecord(skill: SkillSummary, ctx?: ExtensionContext): DecisionRecord | undefined {
+		const key = skillKey(skill);
+		const record = decisions.decisions[key];
+		if (!record) return undefined;
+
+		if (isExpired(record)) {
+			delete decisions.decisions[key];
+			writeDecisionStore(decisions, ctx);
+			updateStatus(ctx);
+			return undefined;
+		}
+
+		return record;
+	}
+
+	function getGlobalDecision(skill: SkillSummary, ctx?: ExtensionContext): GlobalDecision | undefined {
+		return getGlobalDecisionRecord(skill, ctx)?.decision;
 	}
 
 	function hasSessionAllow(ctx: ExtensionContext, skill: SkillSummary): boolean {
-		return sessionAllowsFor(ctx)[skillKey(skill)]?.decision === "allow";
+		return existingSessionAllowsFor(ctx)?.[skillKey(skill)]?.decision === "allow";
+	}
+
+	function hasSessionDeny(ctx: ExtensionContext, skill: SkillSummary): boolean {
+		return existingSessionDeniesFor(ctx)?.[skillKey(skill)]?.decision === "deny";
 	}
 
 	function getEffectiveDecision(ctx: ExtensionContext, skill: SkillSummary): EffectiveDecision | undefined {
-		const globalDecision = getGlobalDecision(skill);
+		if (hasSessionDeny(ctx, skill)) return "session-deny";
+
+		const globalDecision = getGlobalDecision(skill, ctx);
 		if (globalDecision) return globalDecision;
 		if (hasSessionAllow(ctx, skill)) return "session-allow";
 		return undefined;
 	}
 
-	function setGlobalDecision(skill: SkillSummary, decision: GlobalDecision, ctx?: ExtensionContext): void {
-		decisions.decisions[skillKey(skill)] = {
+	function setGlobalDecision(
+		skill: SkillSummary,
+		decision: GlobalDecision,
+		ctx?: ExtensionContext,
+		options: { expiresAt?: string } = {},
+	): void {
+		const key = skillKey(skill);
+		decisions.decisions[key] = {
+			decision,
+			name: skill.name,
+			filePath: path.resolve(skill.filePath),
+			baseDir: path.resolve(skill.baseDir),
+			description: skill.description,
+			source: skill.sourceInfo?.source,
+			scope: skill.sourceInfo?.scope,
+			updatedAt: new Date().toISOString(),
+			expiresAt: options.expiresAt,
+		};
+
+		if (ctx) deleteSessionDecision(ctx, key);
+
+		writeDecisionStore(decisions, ctx);
+		updateStatus(ctx);
+	}
+
+	function setSessionDecision(skill: SkillSummary, decision: SessionDecision, ctx: ExtensionContext): void {
+		const key = skillKey(skill);
+		deleteSessionDecision(ctx, key);
+
+		const target = decision === "allow" ? sessionAllowsFor(ctx) : sessionDeniesFor(ctx);
+		target[key] = {
 			decision,
 			name: skill.name,
 			filePath: path.resolve(skill.filePath),
@@ -351,32 +477,14 @@ export default function (pi: ExtensionAPI) {
 			updatedAt: new Date().toISOString(),
 		};
 
-		if (ctx && decision === "deny") {
-			delete sessionAllowsFor(ctx)[skillKey(skill)];
-		}
-
-		writeDecisionStore(decisions, ctx);
-		updateStatus(ctx);
-	}
-
-	function setSessionAllow(skill: SkillSummary, ctx: ExtensionContext): void {
-		sessionAllowsFor(ctx)[skillKey(skill)] = {
-			decision: "allow",
-			name: skill.name,
-			filePath: path.resolve(skill.filePath),
-			baseDir: path.resolve(skill.baseDir),
-			description: skill.description,
-			source: skill.sourceInfo?.source,
-			scope: skill.sourceInfo?.scope,
-			updatedAt: new Date().toISOString(),
-		};
 		writeDecisionStore(decisions, ctx);
 		updateStatus(ctx);
 	}
 
 	function forgetDecision(skill: SkillSummary, ctx?: ExtensionContext): void {
-		delete decisions.decisions[skillKey(skill)];
-		if (ctx) delete sessionAllowsFor(ctx)[skillKey(skill)];
+		const key = skillKey(skill);
+		delete decisions.decisions[key];
+		if (ctx) deleteSessionDecision(ctx, key);
 		writeDecisionStore(decisions, ctx);
 		updateStatus(ctx);
 	}
@@ -384,6 +492,7 @@ export default function (pi: ExtensionAPI) {
 	function resetAllDecisions(ctx: ExtensionContext): void {
 		for (const key of Object.keys(decisions.decisions)) delete decisions.decisions[key];
 		for (const key of Object.keys(decisions.sessionAllows)) delete decisions.sessionAllows[key];
+		for (const key of Object.keys(decisions.sessionDenies)) delete decisions.sessionDenies[key];
 		writeDecisionStore(decisions, ctx);
 		updateStatus(ctx);
 	}
@@ -394,6 +503,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function findSkillByArg(rawArg: string, ctx: ExtensionContext): SkillSummary | undefined {
+		pruneExpiredDecisions(ctx);
+
 		const arg = rawArg.trim();
 		if (!arg) return undefined;
 
@@ -404,13 +515,19 @@ export default function (pi: ExtensionAPI) {
 		const staleGlobalByName = Object.values(decisions.decisions).find((record) => record.name === normalizedName);
 		if (staleGlobalByName) return decisionToSkillSummary(staleGlobalByName);
 
-		const staleSessionByName = Object.values(sessionAllowsFor(ctx)).find((record) => record.name === normalizedName);
-		if (staleSessionByName) return sessionAllowToSkillSummary(staleSessionByName);
+		const staleSessionByName = [
+			...Object.values(existingSessionAllowsFor(ctx) ?? {}),
+			...Object.values(existingSessionDeniesFor(ctx) ?? {}),
+		].find((record) => record.name === normalizedName);
+		if (staleSessionByName) return sessionDecisionToSkillSummary(staleSessionByName);
 
 		const key = canonicalPath(normalizePathInput(arg, ctx.cwd));
+		const sessionAllow = existingSessionAllowsFor(ctx)?.[key];
+		const sessionDeny = existingSessionDeniesFor(ctx)?.[key];
 		return skillsByFileKey.get(key)
 			?? (decisions.decisions[key] ? decisionToSkillSummary(decisions.decisions[key]) : undefined)
-			?? (sessionAllowsFor(ctx)[key] ? sessionAllowToSkillSummary(sessionAllowsFor(ctx)[key]) : undefined);
+			?? (sessionAllow ? sessionDecisionToSkillSummary(sessionAllow) : undefined)
+			?? (sessionDeny ? sessionDecisionToSkillSummary(sessionDeny) : undefined);
 	}
 
 	function findSkillByReadPath(rawPath: string, cwd: string): SkillSummary | undefined {
@@ -434,17 +551,41 @@ export default function (pi: ExtensionAPI) {
 				"Description:",
 				description,
 				"",
-				"Choose how long this skill may run.",
+				"Choose what to do with this skill.",
 			].join("\n"),
-			["Allow for this session", "Always allow", "Always deny"],
+			[
+				"Allow for this session",
+				"Deny for this session",
+				"Allow for one week",
+				"Deny for one week",
+				"Always allow",
+				"Always deny",
+			],
 		);
 
 		if (!choice) return undefined;
 
 		if (choice === "Allow for this session") {
-			setSessionAllow(skill, ctx);
+			setSessionDecision(skill, "allow", ctx);
 			ctx.ui.notify(`skill-gate: ${skill.name} allowed for this session.`, "info");
 			return "session-allow";
+		}
+
+		if (choice === "Deny for this session") {
+			setSessionDecision(skill, "deny", ctx);
+			ctx.ui.notify(`skill-gate: ${skill.name} denied for this session.`, "warning");
+			return "session-deny";
+		}
+
+		if (choice === "Allow for one week" || choice === "Deny for one week") {
+			const decision: GlobalDecision = choice === "Allow for one week" ? "allow" : "deny";
+			const expiresAt = oneWeekFromNow();
+			setGlobalDecision(skill, decision, ctx, { expiresAt });
+			ctx.ui.notify(
+				`skill-gate: ${skill.name} set to ${decision} until ${expiresAt}.`,
+				decision === "allow" ? "info" : "warning",
+			);
+			return decision;
 		}
 
 		const decision: GlobalDecision = choice === "Always allow" ? "allow" : "deny";
@@ -454,20 +595,38 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function decisionForUse(ctx: ExtensionContext, skill: SkillSummary, trigger: string): Promise<EffectiveDecision | undefined> {
+		pruneExpiredDecisions(ctx);
+
 		const existing = getEffectiveDecision(ctx, skill);
 		if (existing) return existing;
 		return promptForDecision(ctx, skill, trigger);
 	}
 
+	function storedDecisionLabel(record: DecisionRecord): string {
+		return record.expiresAt ? `${record.decision}-week` : record.decision;
+	}
+
+	function storedDecisionSuffix(record: DecisionRecord): string {
+		return record.expiresAt ? ` (expires ${record.expiresAt})` : "";
+	}
+
+	function sessionDecisionLabel(record: SessionDecisionRecord): string {
+		return `session-${record.decision}`;
+	}
+
 	function decisionLabel(ctx: ExtensionContext, skill: SkillSummary): string {
-		const decision = getEffectiveDecision(ctx, skill);
-		if (decision === "allow") return "allow";
-		if (decision === "deny") return "deny";
-		if (decision === "session-allow") return "session";
+		if (hasSessionDeny(ctx, skill)) return "session-deny";
+
+		const globalRecord = getGlobalDecisionRecord(skill, ctx);
+		if (globalRecord) return storedDecisionLabel(globalRecord);
+		if (hasSessionAllow(ctx, skill)) return "session-allow";
 		return "prompt";
 	}
 
 	function decisionListText(ctx: ExtensionContext): string {
+		pruneExpiredDecisions(ctx);
+
+		const pathIndent = " ".repeat(DECISION_LABEL_WIDTH + 3);
 		const lines: string[] = [
 			`Skill gate decisions: ${DECISIONS_PATH}`,
 			`Current session: ${sessionId(ctx)}`,
@@ -479,27 +638,37 @@ export default function (pi: ExtensionAPI) {
 			lines.push("  (no skills discovered yet)");
 		} else {
 			for (const skill of currentSkills.sort((a, b) => a.name.localeCompare(b.name))) {
-				lines.push(`  ${decisionLabel(ctx, skill).padEnd(7)} ${skill.name}`);
-				lines.push(`          ${skill.filePath}`);
+				const label = decisionLabel(ctx, skill);
+				const globalRecord = getGlobalDecisionRecord(skill, ctx);
+				const suffix = globalRecord && label === storedDecisionLabel(globalRecord) ? storedDecisionSuffix(globalRecord) : "";
+				lines.push(`  ${label.padEnd(DECISION_LABEL_WIDTH)} ${skill.name}${suffix}`);
+				lines.push(`${pathIndent}${skill.filePath}`);
 			}
 		}
 
 		const currentKeys = new Set(currentSkills.map(skillKey));
 		const staleRecords = Object.entries(decisions.decisions).filter(([key]) => !currentKeys.has(key));
 		if (staleRecords.length > 0) {
-			lines.push("", "Stored always decisions for skills not currently loaded:");
+			lines.push("", "Stored persistent decisions for skills not currently loaded:");
 			for (const [, record] of staleRecords.sort((a, b) => a[1].name.localeCompare(b[1].name))) {
-				lines.push(`  ${record.decision.padEnd(7)} ${record.name}`);
-				lines.push(`          ${record.filePath}`);
+				lines.push(`  ${storedDecisionLabel(record).padEnd(DECISION_LABEL_WIDTH)} ${record.name}${storedDecisionSuffix(record)}`);
+				lines.push(`${pathIndent}${record.filePath}`);
 			}
 		}
 
-		const staleSessionRecords = Object.entries(sessionAllowsFor(ctx)).filter(([key]) => !currentKeys.has(key));
+		const staleSessionRecords: Array<[string, string, SessionDecisionRecord]> = [];
+		for (const [key, record] of Object.entries(existingSessionAllowsFor(ctx) ?? {})) {
+			if (!currentKeys.has(key)) staleSessionRecords.push([key, sessionDecisionLabel(record), record]);
+		}
+		for (const [key, record] of Object.entries(existingSessionDeniesFor(ctx) ?? {})) {
+			if (!currentKeys.has(key)) staleSessionRecords.push([key, sessionDecisionLabel(record), record]);
+		}
+
 		if (staleSessionRecords.length > 0) {
-			lines.push("", "Stored session allows for skills not currently loaded:");
-			for (const [, record] of staleSessionRecords.sort((a, b) => a[1].name.localeCompare(b[1].name))) {
-				lines.push(`  session ${record.name}`);
-				lines.push(`          ${record.filePath}`);
+			lines.push("", "Stored session decisions for skills not currently loaded:");
+			for (const [, label, record] of staleSessionRecords.sort((a, b) => a[2].name.localeCompare(b[2].name))) {
+				lines.push(`  ${label.padEnd(DECISION_LABEL_WIDTH)} ${record.name}`);
+				lines.push(`${pathIndent}${record.filePath}`);
 			}
 		}
 
@@ -507,6 +676,9 @@ export default function (pi: ExtensionAPI) {
 			"",
 			"Commands:",
 			"  /skill-gate allow-session <skill>",
+			"  /skill-gate deny-session <skill>",
+			"  /skill-gate allow-week <skill>",
+			"  /skill-gate deny-week <skill>",
 			"  /skill-gate allow <skill>",
 			"  /skill-gate deny <skill>",
 			"  /skill-gate forget <skill>",
@@ -517,6 +689,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		pruneExpiredDecisions(ctx);
 		syncSkillsFromCommands();
 		updateStatus(ctx);
 	});
@@ -526,7 +699,10 @@ export default function (pi: ExtensionAPI) {
 		syncSkills(skills.map(toSkillSummary));
 		updateStatus(ctx);
 
-		const filteredSkills = skills.filter((skill) => getGlobalDecision(toSkillSummary(skill)) !== "deny");
+		const filteredSkills = skills.filter((skill) => {
+			const decision = getEffectiveDecision(ctx, toSkillSummary(skill));
+			return decision !== "deny" && decision !== "session-deny";
+		});
 		if (filteredSkills.length === skills.length) return;
 
 		return {
@@ -545,7 +721,9 @@ export default function (pi: ExtensionAPI) {
 		const decision = await decisionForUse(ctx, skill, "/skill command");
 		if (decision === "allow" || decision === "session-allow") return { action: "continue" };
 
-		const reason = decision === "deny" ? `Denied skill ${skill.name}.` : `Skill ${skill.name} requires approval, but no decision was made.`;
+		const reason = decision === "deny" || decision === "session-deny"
+			? `Denied skill ${skill.name}.`
+			: `Skill ${skill.name} requires approval, but no decision was made.`;
 		ctx.ui.notify(`skill-gate: ${reason}`, "warning");
 		return { action: "handled" };
 	});
@@ -560,7 +738,7 @@ export default function (pi: ExtensionAPI) {
 		const decision = await decisionForUse(ctx, skill, "read tool");
 		if (decision === "allow" || decision === "session-allow") return undefined;
 
-		const reason = decision === "deny"
+		const reason = decision === "deny" || decision === "session-deny"
 			? `Skill ${skill.name} denied by skill-gate`
 			: `Skill ${skill.name} requires approval, but no UI decision was made`;
 		return { block: true, reason };
@@ -570,6 +748,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Manage skill gate allow/deny decisions",
 		handler: async (args, ctx) => {
 			syncSkills((ctx.getSystemPromptOptions().skills ?? []).map(toSkillSummary));
+			pruneExpiredDecisions(ctx);
 			updateStatus(ctx);
 
 			const trimmed = args.trim();
@@ -583,7 +762,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (subcommand === "reset") {
-				const ok = await ctx.ui.confirm("Reset skill gate decisions?", `Delete all always and session-scoped decisions in ${DECISIONS_PATH}?`);
+				const ok = await ctx.ui.confirm("Reset skill gate decisions?", `Delete all persistent and session-scoped decisions in ${DECISIONS_PATH}?`);
 				if (!ok) return;
 				resetAllDecisions(ctx);
 				ctx.ui.notify("skill-gate: all decisions cleared.", "info");
@@ -593,19 +772,39 @@ export default function (pi: ExtensionAPI) {
 			const skill = findSkillByArg(targetArg, ctx);
 			if (!skill) {
 				ctx.ui.notify(
-					"Usage: /skill-gate <allow-session|allow|deny|forget> <skill-name-or-path>\nRun /skill-gate list to see current skills.",
+					"Usage: /skill-gate <allow-session|deny-session|allow-week|deny-week|allow|deny|forget> <skill-name-or-path>\nRun /skill-gate list to see current skills.",
 					"warning",
 				);
 				return;
 			}
 
-			if (subcommand === "allow-session" || subcommand === "session" || subcommand === "allow-for-session") {
-				setSessionAllow(skill, ctx);
+			if (subcommand === "allow-session" || subcommand === "session" || subcommand === "allow-for-session" || subcommand === "accept-session") {
+				setSessionDecision(skill, "allow", ctx);
 				ctx.ui.notify(`skill-gate: ${skill.name} allowed for this session.`, "info");
 				return;
 			}
 
-			if (subcommand === "allow" || subcommand === "approve") {
+			if (subcommand === "deny-session" || subcommand === "session-deny" || subcommand === "deny-for-session" || subcommand === "block-session") {
+				setSessionDecision(skill, "deny", ctx);
+				ctx.ui.notify(`skill-gate: ${skill.name} denied for this session.`, "warning");
+				return;
+			}
+
+			if (subcommand === "allow-week" || subcommand === "allow-for-week" || subcommand === "accept-week" || subcommand === "accept-for-week") {
+				const expiresAt = oneWeekFromNow();
+				setGlobalDecision(skill, "allow", ctx, { expiresAt });
+				ctx.ui.notify(`skill-gate: ${skill.name} set to allow until ${expiresAt}.`, "info");
+				return;
+			}
+
+			if (subcommand === "deny-week" || subcommand === "deny-for-week" || subcommand === "block-week" || subcommand === "block-for-week") {
+				const expiresAt = oneWeekFromNow();
+				setGlobalDecision(skill, "deny", ctx, { expiresAt });
+				ctx.ui.notify(`skill-gate: ${skill.name} set to deny until ${expiresAt}.`, "warning");
+				return;
+			}
+
+			if (subcommand === "allow" || subcommand === "approve" || subcommand === "accept") {
 				setGlobalDecision(skill, "allow", ctx);
 				ctx.ui.notify(`skill-gate: ${skill.name} set to allow.`, "info");
 				return;
@@ -623,7 +822,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /skill-gate [list|allow-session|allow|deny|forget|reset]", "warning");
+			ctx.ui.notify("Usage: /skill-gate [list|allow-session|deny-session|allow-week|deny-week|allow|deny|forget|reset]", "warning");
 		},
 	});
 }

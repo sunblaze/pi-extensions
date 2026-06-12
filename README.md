@@ -41,8 +41,8 @@ footer-style
 - ENV: none.
 
 skill-gate
-- Use: Prompts the first time an agent tries to load a skill via `/skill:name` or by reading its skill file, then allows it for the current session or persistently allows/denies future use.
-- Commands: /skill-gate, /skill-gate allow-session <skill>, /skill-gate allow <skill>, /skill-gate deny <skill>, /skill-gate forget <skill>, /skill-gate reset
+- Use: Prompts the first time an agent tries to load a skill via `/skill:name` or by reading its skill file, then allows or denies it for the current session, for one week, or persistently.
+- Commands: /skill-gate, /skill-gate allow-session <skill>, /skill-gate deny-session <skill>, /skill-gate allow-week <skill>, /skill-gate deny-week <skill>, /skill-gate allow <skill>, /skill-gate deny <skill>, /skill-gate forget <skill>, /skill-gate reset
 - Config: ~/.pi/agent/extensions/skill-gate/decisions.json.
 
 moon-pi
