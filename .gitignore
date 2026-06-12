@@ -30,6 +30,7 @@ pnpm-debug.log*
 
 # Extension runtime data
 announcer-input-alert/ratings.json
+skill-gate/decisions.json
 
 # Local/proprietary audio assets
 announcer-input-alert/sounds/*.wav
